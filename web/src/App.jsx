@@ -1,0 +1,1496 @@
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { api } from './api'
+import Sidebar from './Sidebar'
+import Overview from './Overview'
+import SessionView from './SessionView'
+import ModelPicker from './ModelPicker'
+import Modal from './Modal'
+import Toast from './Toast'
+import { Icon, Logo } from './Icons'
+import { basename } from './format'
+
+const EVENT_TYPES = [
+  'session.created',
+  'session.deleted',
+  'session.renamed',
+  'session.inbox.enqueued',
+  'session.inbox.delivered',
+  'session.inbox.cancelled',
+  'session.execution.started',
+  'session.execution.succeeded',
+  'session.execution.failed',
+  'session.execution.interrupted',
+  'session.model.selected',
+  'session.agent.selected',
+  'session.compaction.started',
+  'session.compaction.ended',
+  'session.compaction.failed',
+  'session.revert.staged',
+  'session.revert.cleared',
+  'session.revert.committed',
+  'permission.asked',
+  'permission.replied',
+  'form.created',
+  'form.replied',
+  'form.cancelled',
+  'session.step.ended',
+  'session.step.streamed',
+  'session.text.ended',
+  'project.updated',
+]
+
+function normalizeSessions(payload) {
+  const list = Array.isArray(payload) ? payload : payload?.data || []
+  return list.map((item) => ({ ...item }))
+}
+
+function normalizeQueued(item) {
+  return {
+    id: item.id,
+    time: item.time || { created: Date.now() },
+    text: item.payload?.text || '',
+    files: item.payload?.files || [],
+    type: 'user',
+    delivery: item.delivery,
+    queued: item.delivery === 'queue',
+    steering: item.delivery === 'steer',
+  }
+}
+
+function messageSignature(message) {
+  if (!message) return ''
+  const parts = Array.isArray(message.content) ? message.content : []
+  const tail = parts[parts.length - 1]
+  return [
+    message.id,
+    message.time?.created || 0,
+    message.time?.completed || 0,
+    message.error?.message || '',
+    parts.length,
+    tail?.type || '',
+    (tail?.text || '').length,
+    tail?.state?.status || '',
+    (tail?.state?.output || '').length,
+  ].join('|')
+}
+
+function mergeMessage(known, item) {
+  const previous = known.get(item.id)
+  if (previous?.steering && !item.steering) {
+    known.set(item.id, item)
+    return
+  }
+  if (previous && messageSignature(previous) === messageSignature(item)) return
+  known.set(item.id, item)
+}
+
+async function loadRecentMessages(sessionId, limit = 80) {
+  const page = await api(`/sessions/${sessionId}/messages?limit=${limit}&order=desc`)
+  return {
+    messages: (page?.data || []).slice().reverse(),
+    olderCursor: page?.cursor?.next || null,
+  }
+}
+
+function readRoute() {
+  const raw = (window.location.hash || '').replace(/^#/, '')
+  if (raw.startsWith('/session/')) {
+    const id = decodeURIComponent(raw.slice('/session/'.length))
+    if (id) return { kind: 'session', id }
+  }
+  if (raw.startsWith('/project/')) {
+    const id = decodeURIComponent(raw.slice('/project/'.length))
+    if (id) return { kind: 'project', id }
+  }
+  return { kind: 'overview' }
+}
+
+function routeHash(view, selectedProject) {
+  if (view.kind === 'session') return `#/session/${view.id}`
+  if (selectedProject !== 'all') return `#/project/${selectedProject}`
+  return '#/'
+}
+
+export default function App() {
+  const initialRoute = useMemo(() => readRoute(), [])
+  const [projects, setProjects] = useState([])
+  const [sessions, setSessions] = useState([])
+  const [active, setActive] = useState({})
+  const [completed, setCompleted] = useState({})
+  const [pending, setPending] = useState({ permissions: [], forms: [] })
+  const [attention, setAttention] = useState({})
+  const [service, setService] = useState(null)
+  const [liveConnected, setLiveConnected] = useState(false)
+  const [bootLoading, setBootLoading] = useState(true)
+  const [bootError, setBootError] = useState('')
+
+  const [selectedProject, setSelectedProject] = useState(
+    initialRoute.kind === 'project' ? initialRoute.id : 'all',
+  )
+  const [view, setView] = useState(
+    initialRoute.kind === 'session'
+      ? { kind: 'session', id: initialRoute.id }
+      : { kind: 'overview' },
+  )
+  const [query, setQuery] = useState('')
+  const [page, setPage] = useState(1)
+  const [sidebarOpen, setSidebarOpen] = useState(false)
+
+  const [session, setSession] = useState(null)
+  const [sessionLoading, setSessionLoading] = useState(initialRoute.kind === 'session')
+  const [loadingOlder, setLoadingOlder] = useState(false)
+  const [sending, setSending] = useState(false)
+  const [stopping, setStopping] = useState(false)
+  const [modal, setModal] = useState(null)
+  const [toast, setToast] = useState(null)
+  const [now, setNow] = useState(Date.now())
+
+  const viewRef = useRef(view)
+  const activeRef = useRef(active)
+  const sessionRef = useRef(session)
+  const sessionsRef = useRef(sessions)
+  const messageToken = useRef(0)
+  const toastTimer = useRef(null)
+  const creatingRef = useRef(false)
+  const bootRoute = useRef(initialRoute.kind === 'session' ? initialRoute : null)
+  const hashInitialized = useRef(false)
+  const prevActiveRef = useRef(null)
+
+  useEffect(() => {
+    viewRef.current = view
+  }, [view])
+
+  useEffect(() => {
+    activeRef.current = active
+  }, [active])
+
+  useEffect(() => {
+    sessionRef.current = session
+  }, [session])
+
+  useEffect(() => {
+    sessionsRef.current = sessions
+  }, [sessions])
+
+  useEffect(() => {
+    const previous = prevActiveRef.current
+    prevActiveRef.current = active
+    if (!previous) return
+    const finished = Object.keys(previous).filter((id) => previous[id] && !active[id])
+    if (finished.length === 0) return
+    setCompleted((prev) => {
+      const next = { ...prev }
+      finished.forEach((id) => {
+        const viewing = viewRef.current.kind === 'session' && viewRef.current.id === id
+        if (!viewing) next[id] = 'done'
+      })
+      return next
+    })
+  }, [active])
+
+  const activeKey = useMemo(() => Object.keys(active || {}).sort().join(','), [active])
+
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), 30000)
+    return () => clearInterval(timer)
+  }, [])
+
+  useEffect(() => {
+    if (bootLoading || projects.length === 0) return
+    if (selectedProject !== 'all' && !projects.some((item) => item.id === selectedProject)) {
+      setSelectedProject('all')
+    }
+  }, [bootLoading, projects, selectedProject])
+
+  useEffect(() => {
+    const handler = (event) => {
+      if (event.key !== 'Escape') return
+      if (modal) return
+      if (sidebarOpen) {
+        setSidebarOpen(false)
+        return
+      }
+      if (viewRef.current.kind === 'session') closeSession()
+    }
+    window.addEventListener('keydown', handler)
+    return () => window.removeEventListener('keydown', handler)
+  }, [modal, sidebarOpen])
+
+  const notify = useCallback((text, kind = 'error') => {
+    setToast({ text, kind })
+    if (toastTimer.current) clearTimeout(toastTimer.current)
+    toastTimer.current = setTimeout(() => setToast(null), 4600)
+  }, [])
+
+  const loadSessions = useCallback(async () => {
+    const [live, activeMap] = await Promise.all([
+      api('/sessions?limit=1000'),
+      api('/sessions/active'),
+    ])
+    setSessions(normalizeSessions(live))
+    setActive((activeMap && activeMap.data) || {})
+  }, [])
+
+  const loadPending = useCallback(async (sessionId) => {
+    const [permissionResult, formResult] = await Promise.all([
+      api(`/sessions/${sessionId}/permissions`).catch(() => ({ data: [] })),
+      api(`/sessions/${sessionId}/forms`).catch(() => ({ data: [] })),
+    ])
+    setPending({
+      permissions: permissionResult?.data || [],
+      forms: formResult?.data || [],
+    })
+  }, [])
+
+  const loadAttention = useCallback(async () => {
+    const ids = Array.from(
+      new Set([
+        ...Object.keys(activeRef.current || {}),
+        ...sessionsRef.current.slice(0, 20).map((item) => item.id),
+      ]),
+    )
+    if (ids.length === 0) {
+      setAttention({})
+      return
+    }
+    const entries = await Promise.all(
+      ids.map(async (id) => {
+        const [permissionResult, formResult] = await Promise.all([
+          api(`/sessions/${id}/permissions`).catch(() => ({ data: [] })),
+          api(`/sessions/${id}/forms`).catch(() => ({ data: [] })),
+        ])
+        const count = (permissionResult?.data?.length || 0) + (formResult?.data?.length || 0)
+        return [id, count]
+      }),
+    )
+    setAttention(Object.fromEntries(entries.filter(([, count]) => count > 0)))
+  }, [])
+
+  useEffect(() => {
+    void loadAttention()
+    if (sessions.length === 0) return
+    const timer = setInterval(() => void loadAttention(), 30000)
+    return () => clearInterval(timer)
+  }, [activeKey, sessions.length, loadAttention])
+
+  useEffect(() => {
+    const timer = setInterval(() => {
+      void loadSessions().catch(() => {})
+    }, 60000)
+    const onFocus = () => void loadSessions().catch(() => {})
+    window.addEventListener('focus', onFocus)
+    return () => {
+      clearInterval(timer)
+      window.removeEventListener('focus', onFocus)
+    }
+  }, [loadSessions])
+
+  const loadSession = useCallback(async (sessionId, options = {}) => {
+    const silent = Boolean(options.silent)
+    const token = messageToken.current + 1
+    messageToken.current = token
+    if (!silent) setSessionLoading(true)
+    try {
+      const [detail, recent] = await Promise.all([
+        api(`/sessions/${sessionId}`),
+        loadRecentMessages(sessionId),
+      ])
+      if (token !== messageToken.current) return
+      setSession({
+        info: detail?.data || detail,
+        messages: recent.messages,
+        olderCursor: recent.olderCursor,
+      })
+      void loadPending(sessionId)
+    } catch (error) {
+      if (token !== messageToken.current) return
+      if (!silent) notify(error.message)
+    } finally {
+      if (token === messageToken.current && !silent) setSessionLoading(false)
+    }
+  }, [loadPending, notify])
+
+  const syncSession = useCallback(async (sessionId, options = {}) => {
+    const token = messageToken.current
+    const current = sessionRef.current
+    const [detail, inbox] = await Promise.all([
+      api(`/sessions/${sessionId}`),
+      api(`/sessions/${sessionId}/inbox`).catch(() => ({ data: [] })),
+    ])
+    if (token !== messageToken.current) return
+    const info = detail?.data || detail
+    const base = current && current.info?.id === sessionId ? current : null
+    const known = new Map()
+    if (base) {
+      base.messages.forEach((item) => {
+        if (!String(item.id).startsWith('local_')) known.set(item.id, item)
+      })
+    }
+    const inboxItems = (inbox?.data || []).filter((item) => item.type === 'user')
+    const baseIds = new Set(base ? base.messages.map((item) => item.id) : [])
+    const inboxNew = inboxItems.some((item) => !baseIds.has(item.id))
+    inboxItems.forEach((item) => {
+      if (known.has(item.id)) return
+      known.set(item.id, normalizeQueued(item))
+    })
+    let messages = Array.from(known.values())
+    let olderCursor = base?.olderCursor || null
+    const unchanged =
+      !options.force &&
+      base &&
+      info?.time?.updated &&
+      base.info?.time?.updated === info.time.updated &&
+      !inboxNew
+    if (!unchanged) {
+      const limit = options.limit || 12
+      const page = await api(`/sessions/${sessionId}/messages?limit=${limit}&order=desc`)
+      if (token !== messageToken.current) return
+      const incoming = (page?.data || []).slice().reverse()
+      const overlap = incoming.some((item) => known.has(item.id))
+      if (base && known.size > 0 && incoming.length > 0 && !overlap) {
+        const recent = await loadRecentMessages(sessionId)
+        if (token !== messageToken.current) return
+        messages = recent.messages
+        olderCursor = recent.olderCursor
+      } else {
+        incoming.forEach((item) => mergeMessage(known, item))
+        messages = Array.from(known.values())
+        if (!base) olderCursor = page?.cursor?.next || null
+      }
+    }
+    const locals = base ? base.messages.filter((item) => String(item.id).startsWith('local_')) : []
+    messages = messages.concat(locals)
+    messages.sort((a, b) => (a.time?.created || 0) - (b.time?.created || 0))
+    setSession({ info, messages, olderCursor })
+  }, [])
+
+  const bootstrap = useCallback(async () => {
+    setBootLoading(true)
+    setBootError('')
+    try {
+      const health = await api('/health')
+      setService(health)
+      if (!health.reachable) {
+        setBootError('opencode 服务没有响应，请确认本机 opencode 正在运行')
+        return
+      }
+      const projectList = await api('/projects')
+      setProjects(Array.isArray(projectList) ? projectList : [])
+      await loadSessions()
+    } catch (error) {
+      setBootError(error.message)
+    } finally {
+      setBootLoading(false)
+    }
+  }, [loadSessions])
+
+  useEffect(() => {
+    void bootstrap()
+  }, [bootstrap])
+
+  useEffect(() => {
+    if (bootLoading) return
+    const route = bootRoute.current
+    if (!route) return
+    bootRoute.current = null
+    setView({ kind: 'session', id: route.id })
+    void loadSession(route.id)
+  }, [bootLoading, loadSession])
+
+  useEffect(() => {
+    if (view.kind !== 'session' || session?.info?.id !== view.id) return
+    const projectId = session.info.projectID
+    if (projectId && selectedProject !== projectId) setSelectedProject(projectId)
+  }, [view, session, selectedProject])
+
+  const applyRoute = useCallback((route) => {
+    if (route.kind === 'session') {
+      const current = viewRef.current
+      if (current.kind === 'session' && current.id === route.id) return
+      setView({ kind: 'session', id: route.id })
+      setSidebarOpen(false)
+      setCompleted((prev) => {
+        if (!prev[route.id]) return prev
+        const next = { ...prev }
+        delete next[route.id]
+        return next
+      })
+      void loadSession(route.id)
+      return
+    }
+    setSession(null)
+    setPage(1)
+    setView({ kind: 'overview' })
+    setSelectedProject(route.kind === 'project' ? route.id : 'all')
+  }, [loadSession])
+
+  useEffect(() => {
+    const handler = () => applyRoute(readRoute())
+    window.addEventListener('hashchange', handler)
+    return () => window.removeEventListener('hashchange', handler)
+  }, [applyRoute])
+
+  useEffect(() => {
+    const target = routeHash(view, selectedProject)
+    if (window.location.hash === target) {
+      hashInitialized.current = true
+      return
+    }
+    if (!hashInitialized.current) {
+      window.history.replaceState(null, '', target)
+      hashInitialized.current = true
+      return
+    }
+    window.location.hash = target
+  }, [view, selectedProject])
+
+  useEffect(() => {
+    let sessionsTimer = null
+    let messagesTimer = null
+    let pendingTimer = null
+    let messagesForce = false
+
+    const scheduleSessions = (delay = 2000) => {
+      if (sessionsTimer) return
+      sessionsTimer = setTimeout(async () => {
+        sessionsTimer = null
+        try {
+          await loadSessions()
+        } catch {
+          /* 后台刷新失败时保留现有数据 */
+        }
+      }, delay)
+    }
+
+    const scheduleMessages = (delay = 900, options = {}) => {
+      if (options.force) messagesForce = true
+      if (messagesTimer) return
+      messagesTimer = setTimeout(async () => {
+        messagesTimer = null
+        const force = messagesForce
+        messagesForce = false
+        if (viewRef.current.kind !== 'session') return
+        try {
+          await syncSession(viewRef.current.id, force ? { force: true, limit: 6 } : {})
+        } catch {
+          /* 后台同步失败时保留现有数据 */
+        }
+      }, delay)
+    }
+
+    const schedulePending = (delay = 300) => {
+      if (pendingTimer) return
+      pendingTimer = setTimeout(async () => {
+        pendingTimer = null
+        if (viewRef.current.kind !== 'session') return
+        try {
+          await loadPending(viewRef.current.id)
+        } catch {
+          /* 读取待处理请求失败时保留现有数据 */
+        }
+      }, delay)
+    }
+
+    const source = new EventSource(
+      `/api/events?${EVENT_TYPES.map((type) => `types=${encodeURIComponent(type)}`).join('&')}`,
+    )
+    source.onopen = () => setLiveConnected(true)
+    source.onerror = () => setLiveConnected(false)
+    source.onmessage = (event) => {
+      let payload = null
+      try {
+        payload = JSON.parse(event.data)
+      } catch {
+        return
+      }
+      const type = payload?.type || ''
+      if (type === 'server.connected') {
+        setLiveConnected(true)
+        return
+      }
+      if (type === 'session.deleted') {
+        const deletedId = payload?.data?.sessionID || payload?.data?.id
+        if (deletedId && viewRef.current.kind === 'session' && viewRef.current.id === deletedId) {
+          setView({ kind: 'overview' })
+          setSession(null)
+          notify('当前会话已被删除')
+        }
+        scheduleSessions(300)
+        return
+      }
+      if (
+        type === 'session.created' ||
+        type === 'session.renamed' ||
+        type.startsWith('project.')
+      ) {
+        scheduleSessions(600)
+        return
+      }
+      if (
+        type === 'session.inbox.enqueued' ||
+        type === 'session.inbox.delivered' ||
+        type === 'session.inbox.cancelled' ||
+        type === 'session.execution.started' ||
+        type === 'session.execution.succeeded' ||
+        type === 'session.execution.failed' ||
+        type === 'session.execution.interrupted'
+      ) {
+        const executed = payload?.data?.sessionID
+        if (
+          executed &&
+          (type === 'session.execution.succeeded' || type === 'session.execution.failed')
+        ) {
+          const viewing = viewRef.current.kind === 'session' && viewRef.current.id === executed
+          if (!viewing) {
+            setCompleted((prev) => ({
+              ...prev,
+              [executed]: type === 'session.execution.failed' ? 'failed' : 'done',
+            }))
+          }
+        }
+        if (type !== 'session.execution.started') scheduleSessions(1200)
+        scheduleMessages(500)
+        return
+      }
+      if (type === 'session.step.ended') {
+        scheduleMessages(400, { force: true })
+        return
+      }
+      if (type === 'session.step.streamed' || type === 'session.text.ended') {
+        scheduleMessages(700, { force: true })
+        return
+      }
+      if (
+        type === 'permission.asked' ||
+        type === 'permission.replied' ||
+        type === 'form.created' ||
+        type === 'form.replied' ||
+        type === 'form.cancelled'
+      ) {
+        schedulePending(200)
+        void loadAttention()
+        return
+      }
+      if (type === 'session.model.selected' || type === 'session.agent.selected') {
+        scheduleMessages(300, { force: true })
+        return
+      }
+      if (type.startsWith('session.compaction.')) {
+        scheduleMessages(500, { force: true })
+        scheduleSessions(800)
+        return
+      }
+      if (type.startsWith('session.revert.')) {
+        if (viewRef.current.kind === 'session') {
+          void loadSession(viewRef.current.id, { silent: true })
+        }
+        scheduleSessions(600)
+      }
+    }
+    return () => {
+      source.close()
+      if (sessionsTimer) clearTimeout(sessionsTimer)
+      if (messagesTimer) clearTimeout(messagesTimer)
+      if (pendingTimer) clearTimeout(pendingTimer)
+    }
+  }, [loadPending, loadSessions, loadSession, loadAttention, syncSession, notify])
+
+  const projectById = useMemo(() => {
+    const map = new Map()
+    projects.forEach((project) => map.set(project.id, project))
+    return map
+  }, [projects])
+
+  const sessionCounts = useMemo(() => {
+    const counts = new Map()
+    sessions.forEach((item) => {
+      counts.set(item.projectID, (counts.get(item.projectID) || 0) + 1)
+    })
+    return counts
+  }, [sessions])
+
+  const visibleProjects = useMemo(
+    () =>
+      projects.filter(
+        (project) => project.exists !== false && (sessionCounts.get(project.id) || 0) > 0,
+      ),
+    [projects, sessionCounts],
+  )
+
+  const sidebarProjects = useMemo(() => {
+    const keyword = query.trim().toLowerCase()
+    const list = keyword
+      ? visibleProjects.filter((project) => {
+          const haystack = [
+            project.canonical || '',
+            project.name || '',
+            basename(project.canonical || ''),
+          ]
+            .join(' ')
+            .toLowerCase()
+          if (haystack.includes(keyword)) return true
+          return sessions.some(
+            (item) =>
+              item.projectID === project.id &&
+              (item.title || '').toLowerCase().includes(keyword),
+          )
+        })
+      : visibleProjects
+    const latest = new Map()
+    sessions.forEach((item) => {
+      const stamp = item.time?.updated || 0
+      if (stamp > (latest.get(item.projectID) || 0)) latest.set(item.projectID, stamp)
+    })
+    return list
+      .slice()
+      .sort(
+        (a, b) =>
+          (latest.get(b.id) || b.time?.active || 0) - (latest.get(a.id) || a.time?.active || 0),
+      )
+  }, [visibleProjects, query, sessions])
+
+  const allSessions = useMemo(
+    () =>
+      sessions
+        .slice()
+        .sort((a, b) => (b.time?.updated || 0) - (a.time?.updated || 0)),
+    [sessions],
+  )
+
+  const filteredSessions = useMemo(() => {
+    const keyword = query.trim().toLowerCase()
+    return allSessions.filter((item) => {
+      if (selectedProject !== 'all' && item.projectID !== selectedProject) return false
+      if (!keyword) return true
+      const project = projectById.get(item.projectID)
+      const haystack = [
+        item.title || '',
+        project?.canonical || '',
+        project?.name || '',
+        item.model?.id || '',
+        item.model?.providerID || '',
+      ]
+        .join(' ')
+        .toLowerCase()
+      return haystack.includes(keyword)
+    })
+  }, [allSessions, selectedProject, query, projectById])
+
+  const currentProject = selectedProject === 'all' ? null : projectById.get(selectedProject) || null
+  const sessionProject =
+    view.kind === 'session' ? projectById.get(session?.info?.projectID || '') || null : null
+  const breadcrumbProject = sessionProject || currentProject
+  const activeCount = Object.keys(active || {}).length
+
+  const openProject = (projectId) => {
+    setSelectedProject(projectId)
+    setView({ kind: 'overview' })
+    setPage(1)
+    setSession(null)
+    setSidebarOpen(false)
+  }
+
+  const openSession = (sessionId, projectId) => {
+    if (projectId && selectedProject !== 'all' && selectedProject !== projectId) {
+      setSelectedProject(projectId)
+    }
+    setView({ kind: 'session', id: sessionId })
+    setSidebarOpen(false)
+    setCompleted((prev) => {
+      if (!prev[sessionId]) return prev
+      const next = { ...prev }
+      delete next[sessionId]
+      return next
+    })
+    void loadSession(sessionId)
+  }
+
+  const createSession = async (chosenProject = null) => {
+    if (creatingRef.current) return
+    const preferred =
+      chosenProject || (selectedProject === 'all' ? null : projectById.get(selectedProject))
+    const latest = sessions
+      .map((item) => projectById.get(item.projectID))
+      .find((project) => project && project.exists !== false)
+    const target =
+      preferred ||
+      latest ||
+      sidebarProjects[0] ||
+      projects.find((project) => project.exists !== false)
+    if (!target?.canonical) {
+      notify('没有可用的项目目录，无法新建会话')
+      return
+    }
+    creatingRef.current = true
+    try {
+      const result = await api('/sessions', {
+        method: 'POST',
+        body: JSON.stringify({ location: { directory: target.canonical } }),
+      })
+      const info = result?.data
+      if (!info?.id) throw new Error('新建会话失败')
+      await loadSessions()
+      setSelectedProject(info.projectID || target.id)
+      setView({ kind: 'session', id: info.id })
+      setSession(null)
+      setSidebarOpen(false)
+      notify('已新建会话', 'success')
+      void loadSession(info.id)
+    } catch (error) {
+      notify(error.message)
+    } finally {
+      creatingRef.current = false
+    }
+  }
+
+  const closeSession = () => {
+    setView({ kind: 'overview' })
+    setSession(null)
+  }
+
+  useEffect(() => {
+    const handler = (event) => {
+      if (!(event.metaKey || event.ctrlKey) || event.shiftKey) return
+      if (event.key.toLowerCase() !== 'n') return
+      event.preventDefault()
+      void createSession()
+    }
+    window.addEventListener('keydown', handler)
+    return () => window.removeEventListener('keydown', handler)
+  }, [createSession])
+
+  const refreshCurrent = async () => {
+    try {
+      await loadSessions()
+      if (view.kind === 'session') await loadSession(view.id, { silent: true })
+      notify('已刷新', 'success')
+    } catch (error) {
+      notify(error.message)
+    }
+  }
+
+  const updateSessionMeta = async (sessionId, payload) => {
+    await api(`/sessions/${sessionId}`, {
+      method: 'PATCH',
+      body: JSON.stringify(payload),
+    })
+    await loadSessions()
+    if (view.kind === 'session' && view.id === sessionId) {
+      await loadSession(sessionId, { silent: true })
+    }
+  }
+
+  const handleRename = async (title) => {
+    const sessionId = modal?.sessionId || (view.kind === 'session' ? view.id : null)
+    if (!sessionId) return
+    try {
+      await updateSessionMeta(sessionId, { title })
+      setModal(null)
+      notify('标题已更新', 'success')
+    } catch (error) {
+      notify(error.message)
+    }
+  }
+
+  const handleDelete = async () => {
+    const target = modal?.session
+    if (!target) return
+    try {
+      await api(`/sessions/${target.id}`, { method: 'DELETE' })
+      try {
+        window.localStorage.removeItem(`ocm_draft_${target.id}`)
+      } catch {
+        /* 浏览器禁用存储时忽略 */
+      }
+      setModal(null)
+      if (view.kind === 'session' && view.id === target.id) closeSession()
+      await loadSessions()
+      notify('会话已删除', 'success')
+    } catch (error) {
+      notify(error.message)
+    }
+  }
+
+  const handleRenameProject = async (title) => {
+    const projectId = modal?.projectId
+    if (!projectId) return
+    try {
+      await api(`/projects/${projectId}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ name: title }),
+      })
+      const list = await api('/projects')
+      setProjects(Array.isArray(list) ? list : [])
+      setModal(null)
+      notify('项目名称已更新', 'success')
+    } catch (error) {
+      notify(error.message)
+    }
+  }
+
+  const handleSend = async (text, attachments = []) => {
+    const current = viewRef.current
+    if (current.kind !== 'session') return false
+    const sessionId = current.id
+    const running = Boolean(activeRef.current[sessionId])
+    const tempId = `local_${Date.now()}`
+    const files = attachments.map((item) => ({
+      uri: item.uri,
+      name: item.name,
+      source: { type: 'inline' },
+    }))
+    const optimistic = {
+      id: tempId,
+      time: { created: Date.now() },
+      text,
+      files: attachments.map((item) => ({ name: item.name, mime: item.mime })),
+      agents: [],
+      type: 'user',
+      steering: running,
+    }
+    setSession((prev) =>
+      prev && prev.info?.id === sessionId
+        ? { ...prev, messages: [...prev.messages, optimistic] }
+        : prev,
+    )
+    setSending(true)
+    try {
+      const body = { text }
+      if (files.length > 0) body.files = files
+      if (running) body.delivery = 'steer'
+      const result = await api(`/sessions/${sessionId}/prompt`, {
+        method: 'POST',
+        body: JSON.stringify(body),
+      })
+      const admitted = result?.data
+      setSession((prev) => {
+        if (!prev || prev.info?.id !== sessionId) return prev
+        const messages = prev.messages.map((item) =>
+          item.id === tempId
+            ? {
+                id: admitted?.id || tempId,
+                time: { created: admitted?.time?.created || Date.now() },
+                text: admitted?.payload?.text || text,
+                files: admitted?.payload?.files || [],
+                type: 'user',
+                delivery: admitted?.delivery,
+                queued: admitted?.delivery === 'queue',
+                steering: admitted?.delivery === 'steer',
+              }
+            : item,
+        )
+        return { ...prev, messages }
+      })
+      void loadSessions().catch(() => {})
+      return true
+    } catch (error) {
+      setSession((prev) =>
+        prev && prev.info?.id === sessionId
+          ? { ...prev, messages: prev.messages.filter((item) => item.id !== tempId) }
+          : prev,
+      )
+      notify(error.message)
+      return false
+    } finally {
+      setSending(false)
+    }
+  }
+
+  const handleStop = async () => {
+    const current = viewRef.current
+    if (current.kind !== 'session' || stopping) return
+    const sessionId = current.id
+    setStopping(true)
+    try {
+      const result = await api(`/sessions/${sessionId}/interrupt`, { method: 'POST' })
+      const interrupted = result?.interrupted ?? result?.data?.interrupted
+      if (interrupted === false) {
+        notify('这一轮已经结束，没有可中断的执行', 'success')
+      } else {
+        notify('已中断执行', 'success')
+        setActive((prev) => {
+          const next = { ...prev }
+          delete next[sessionId]
+          return next
+        })
+      }
+      await syncSession(sessionId)
+      void loadSessions().catch(() => {})
+    } catch (error) {
+      notify(error.message)
+    } finally {
+      setStopping(false)
+    }
+  }
+
+  const compactSession = async () => {
+    const current = viewRef.current
+    if (current.kind !== 'session') return
+    try {
+      await api(`/sessions/${current.id}/compact`, {
+        method: 'POST',
+        body: JSON.stringify({}),
+      })
+      notify('已请求压缩上下文', 'success')
+    } catch (error) {
+      notify(error.message)
+    }
+  }
+
+  const findLastUser = () => {
+    const messages = sessionRef.current?.messages || []
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+      if (messages[index]?.type === 'user' && !String(messages[index].id).startsWith('local_')) {
+        return messages[index]
+      }
+    }
+    return null
+  }
+
+  const runRevert = async (lastUser, respawn) => {
+    const current = viewRef.current
+    if (current.kind !== 'session') return
+    const sessionId = current.id
+    await api(`/sessions/${sessionId}/revert`, {
+      method: 'POST',
+      body: JSON.stringify({ messageID: lastUser.id, files: false }),
+    })
+    await api(`/sessions/${sessionId}/revert/commit`, { method: 'POST' })
+    if (respawn) {
+      const files = (lastUser.files || []).map((item) => ({
+        uri: item.uri || `data:${item.mime || 'application/octet-stream'};base64,${item.data}`,
+        name: item.name,
+        source: { type: 'inline' },
+      }))
+      const body = { text: lastUser.text || '' }
+      if (files.length > 0) body.files = files
+      await api(`/sessions/${sessionId}/prompt`, {
+        method: 'POST',
+        body: JSON.stringify(body),
+      })
+      notify('已重新生成上一条', 'success')
+    } else {
+      notify('已撤销上一轮', 'success')
+    }
+    await loadSession(sessionId, { silent: true })
+    await loadSessions()
+  }
+
+  const handleUndo = async () => {
+    const lastUser = findLastUser()
+    if (!lastUser) {
+      notify('没有可撤销的消息')
+      setModal(null)
+      return
+    }
+    try {
+      await runRevert(lastUser, false)
+      setModal(null)
+    } catch (error) {
+      notify(error.message)
+    }
+  }
+
+  const handleRegenerate = async () => {
+    const lastUser = findLastUser()
+    if (!lastUser) {
+      notify('没有可重新生成的消息')
+      setModal(null)
+      return
+    }
+    try {
+      await runRevert(lastUser, true)
+      setModal(null)
+    } catch (error) {
+      notify(error.message)
+    }
+  }
+
+  const cancelQueued = useCallback(async (messageId) => {
+    const current = viewRef.current
+    if (current.kind !== 'session') return
+    try {
+      await api(`/sessions/${current.id}/inbox/${messageId}`, { method: 'DELETE' })
+      setSession((prev) =>
+        prev && prev.info?.id === current.id
+          ? { ...prev, messages: prev.messages.filter((item) => item.id !== messageId) }
+          : prev,
+      )
+      notify('已取消排队', 'success')
+    } catch (error) {
+      notify(error.message)
+    }
+  }, [notify])
+
+  const replyPermission = useCallback(async (request, decision) => {
+    const current = viewRef.current
+    if (current.kind !== 'session') return
+    try {
+      await api(`/sessions/${current.id}/permissions/${request.id}/reply`, {
+        method: 'POST',
+        body: JSON.stringify({ decision }),
+      })
+      setPending((prev) => ({
+        ...prev,
+        permissions: prev.permissions.filter((item) => item.id !== request.id),
+      }))
+      notify(decision === 'reject' ? '已拒绝授权' : '已允许授权', 'success')
+      void loadAttention()
+    } catch (error) {
+      notify(error.message)
+    }
+  }, [loadAttention, notify])
+
+  const replyForm = useCallback(async (form, answer) => {
+    const current = viewRef.current
+    if (current.kind !== 'session') return
+    try {
+      await api(`/sessions/${current.id}/forms/${form.id}/reply`, {
+        method: 'POST',
+        body: JSON.stringify({ answer }),
+      })
+      setPending((prev) => ({
+        ...prev,
+        forms: prev.forms.filter((item) => item.id !== form.id),
+      }))
+      notify('已提交', 'success')
+      void loadAttention()
+    } catch (error) {
+      notify(error.message)
+    }
+  }, [loadAttention, notify])
+
+  const cancelForm = useCallback(async (form) => {
+    const current = viewRef.current
+    if (current.kind !== 'session') return
+    try {
+      await api(`/sessions/${current.id}/forms/${form.id}`, { method: 'DELETE' })
+      setPending((prev) => ({
+        ...prev,
+        forms: prev.forms.filter((item) => item.id !== form.id),
+      }))
+      notify('已关闭表单', 'success')
+      void loadAttention()
+    } catch (error) {
+      notify(error.message)
+    }
+  }, [loadAttention, notify])
+
+  const switchModel = async (model) => {
+    const sessionId = viewRef.current.kind === 'session' ? viewRef.current.id : null
+    if (!sessionId) return
+    try {
+      await api(`/sessions/${sessionId}/model`, {
+        method: 'POST',
+        body: JSON.stringify({ model }),
+      })
+      setModal(null)
+      await loadSession(sessionId, { silent: true })
+      notify('模型已切换', 'success')
+    } catch (error) {
+      notify(error.message)
+    }
+  }
+
+  const switchAgent = async (agent) => {
+    const sessionId = viewRef.current.kind === 'session' ? viewRef.current.id : null
+    if (!sessionId) return
+    try {
+      await api(`/sessions/${sessionId}/agent`, {
+        method: 'POST',
+        body: JSON.stringify({ agent }),
+      })
+      setModal(null)
+      await loadSession(sessionId, { silent: true })
+      notify('agent 已切换', 'success')
+    } catch (error) {
+      notify(error.message)
+    }
+  }
+
+  const loadOlder = async () => {
+    const current = sessionRef.current
+    if (!current?.olderCursor || loadingOlder) return false
+    const sessionId = current.info?.id
+    setLoadingOlder(true)
+    try {
+      const page = await api(
+        `/sessions/${sessionId}/messages?limit=80&cursor=${encodeURIComponent(current.olderCursor)}`,
+      )
+      const older = (page?.data || []).slice().reverse()
+      setSession((prev) => {
+        if (!prev || prev.info?.id !== sessionId) return prev
+        const ids = new Set(prev.messages.map((item) => item.id))
+        const merged = older.filter((item) => !ids.has(item.id)).concat(prev.messages)
+        return { ...prev, messages: merged, olderCursor: page?.cursor?.next || null }
+      })
+      return true
+    } catch (error) {
+      notify(error.message)
+      return false
+    } finally {
+      setLoadingOlder(false)
+    }
+  }
+
+  const openAttachment = async (messageId, index) => {
+    const current = viewRef.current
+    if (current.kind !== 'session') return
+    try {
+      const result = await api(`/sessions/${current.id}/messages/${messageId}`)
+      const message = result?.data || result
+      const file = (message?.files || [])[index]
+      if (!file?.data || !String(file.mime || '').startsWith('image/')) {
+        notify('这个附件不支持预览')
+        return
+      }
+      setModal({
+        kind: 'image',
+        src: `data:${file.mime};base64,${file.data}`,
+        name: file.name || '附件',
+      })
+    } catch (error) {
+      notify(error.message)
+    }
+  }
+
+  const openSessionFolder = async (item) => {
+    const directory =
+      item?.location?.directory || projectById.get(item?.projectID || '')?.canonical
+    if (!directory) {
+      notify('找不到项目目录')
+      return
+    }
+    try {
+      await api('/reveal', {
+        method: 'POST',
+        body: JSON.stringify({ path: directory, target: 'finder' }),
+      })
+      notify('已打开项目文件夹', 'success')
+    } catch (error) {
+      notify(error.message)
+    }
+  }
+
+  const openFinder = async (target, project = null) => {
+    const directory = (project || currentProject)?.canonical
+    if (!directory) return
+    try {
+      await api('/reveal', {
+        method: 'POST',
+        body: JSON.stringify({ path: directory, target }),
+      })
+      notify(target === 'terminal' ? '已在终端打开项目目录' : '已在访达打开项目目录', 'success')
+    } catch (error) {
+      notify(error.message)
+    }
+  }
+
+  const copyCommand = async (project = null) => {
+    const directory = (project || currentProject)?.canonical
+    if (!directory) return
+    const command = `cd "${directory}" && opencode`
+    try {
+      await navigator.clipboard.writeText(command)
+      notify('启动命令已复制', 'success')
+    } catch {
+      notify('浏览器拒绝了剪贴板写入，请手动复制目录', 'error')
+    }
+  }
+
+  const currentSessionItem = view.kind === 'session' ? session?.info : null
+  const running = Boolean(currentSessionItem && active[currentSessionItem.id])
+
+  if (bootLoading) {
+    return (
+      <div className="boot-screen">
+        <Logo size={44} />
+        <p>正在读取 opencode 数据…</p>
+      </div>
+    )
+  }
+
+  if (bootError) {
+    return (
+      <div className="boot-screen">
+        <Logo size={44} />
+        <h1>无法连接 opencode</h1>
+        <p className="boot-message">{bootError}</p>
+        <button className="primary-button" onClick={() => void bootstrap()}>
+          重新连接
+        </button>
+      </div>
+    )
+  }
+
+  return (
+    <div className="app-shell">
+      <Sidebar
+        projects={sidebarProjects}
+        projectById={projectById}
+        selectedProject={selectedProject}
+        onSelectProject={openProject}
+        sessions={allSessions}
+        activeSessionId={view.kind === 'session' ? view.id : null}
+        active={active}
+        query={query}
+        onQueryChange={setQuery}
+        onOpenSession={openSession}
+        sessionCounts={sessionCounts}
+        projectTotal={visibleProjects.length}
+        service={service}
+        liveConnected={liveConnected}
+        activeCount={activeCount}
+        open={sidebarOpen}
+        onClose={() => setSidebarOpen(false)}
+        now={now}
+        onCreateSession={() => void createSession()}
+        completed={completed}
+        attention={attention}
+        onOpenFolder={openSessionFolder}
+        onGoHome={() => openProject('all')}
+        onNewSessionInProject={(project) => void createSession(project)}
+        onOpenProjectFolder={(project, target) => void openFinder(target, project)}
+        onCopyProjectCommand={(project) => void copyCommand(project)}
+        onRenameProject={(project) =>
+          setModal({
+            kind: 'project-rename',
+            projectId: project.id,
+            title: project.name || basename(project.canonical),
+          })
+        }
+      />
+
+      <main className="main-panel">
+        <header className="topbar">
+          <div className="topbar-left">
+            <button
+              className="icon-button mobile-only"
+              onClick={() => setSidebarOpen(true)}
+              aria-label="打开菜单"
+            >
+              <Icon name="menu" />
+            </button>
+            <div className="breadcrumb">
+              <button className="crumb" onClick={() => openProject('all')}>
+                全部项目
+              </button>
+              {breadcrumbProject ? (
+                <>
+                  <Icon name="chevronRight" size={14} className="crumb-sep" />
+                  <button className="crumb project-crumb" onClick={() => openProject(breadcrumbProject.id)}>
+                    {breadcrumbProject.name || basename(breadcrumbProject.canonical)}
+                  </button>
+                </>
+              ) : null}
+              {view.kind === 'session' && currentSessionItem ? (
+                <>
+                  <Icon name="chevronRight" size={14} className="crumb-sep" />
+                  <span className="crumb current">{currentSessionItem.title || '未命名会话'}</span>
+                </>
+              ) : null}
+            </div>
+          </div>
+          <div className="topbar-right">
+            <span className={`live-pill ${liveConnected ? 'on' : 'off'}`}>
+              <span className="live-dot" />
+              <span className="live-label">{liveConnected ? '实时同步' : '实时断开'}</span>
+            </span>
+            <button className="icon-button" onClick={() => void refreshCurrent()} aria-label="刷新数据">
+              <Icon name="refresh" />
+            </button>
+          </div>
+        </header>
+
+        <div className="content">
+          {view.kind === 'overview' ? (
+            <Overview
+              project={currentProject}
+              projects={projects}
+              sessions={filteredSessions}
+              active={active}
+              page={page}
+              onPageChange={setPage}
+              onOpenSession={openSession}
+              onCreateSession={() => void createSession()}
+              onOpenFinder={() => void openFinder('finder')}
+              onOpenTerminal={() => void openFinder('terminal')}
+              onCopyCommand={() => void copyCommand()}
+              onRenameProject={() =>
+                currentProject &&
+                setModal({
+                  kind: 'project-rename',
+                  projectId: currentProject.id,
+                  title: currentProject.name || basename(currentProject.canonical),
+                })
+              }
+              query={query}
+              now={now}
+            />
+          ) : (
+            <SessionView
+              session={session}
+              sessionId={view.id}
+              loading={sessionLoading}
+              busy={running}
+              stopping={stopping}
+              olderCursor={session?.olderCursor}
+              loadingOlder={loadingOlder}
+              onLoadOlder={loadOlder}
+              onBack={closeSession}
+              onRename={() =>
+                setModal({
+                  kind: 'rename',
+                  sessionId: view.id,
+                  title: session?.info?.title || '',
+                })
+              }
+              onCancelQueued={cancelQueued}
+              onDelete={() =>
+                setModal({
+                  kind: 'delete',
+                  session: currentSessionItem || { id: view.id, title: session?.info?.title },
+                })
+              }
+              onOpenAttachment={openAttachment}
+              onSend={handleSend}
+              onStop={handleStop}
+              pending={pending}
+              onReplyPermission={replyPermission}
+              onReplyForm={replyForm}
+              onCancelForm={cancelForm}
+              onOpenModel={() => setModal({ kind: 'model' })}
+              onOpenFolder={() => void openSessionFolder(session?.info)}
+              onCompact={() => void compactSession()}
+              onUndo={() => setModal({ kind: 'revert', mode: 'undo' })}
+              onRegenerate={() => setModal({ kind: 'revert', mode: 'regenerate' })}
+              sending={sending}
+              project={projectById.get(session?.info?.projectID || '')}
+              now={now}
+            />
+          )}
+        </div>
+      </main>
+
+      {sidebarOpen ? <div className="sidebar-mask" onClick={() => setSidebarOpen(false)} /> : null}
+
+      {modal?.kind === 'rename' ? (
+        <RenameModal
+          title={modal.title}
+          onClose={() => setModal(null)}
+          onSubmit={handleRename}
+        />
+      ) : null}
+
+      {modal?.kind === 'delete' ? (
+        <Modal title="删除会话" onClose={() => setModal(null)}>
+          <p className="modal-text">
+            会话「{modal.session?.title || '未命名会话'}」及其消息会被永久删除，无法恢复。
+          </p>
+          <div className="modal-actions">
+            <button className="ghost-button" onClick={() => setModal(null)}>
+              取消
+            </button>
+            <button className="danger-button" onClick={() => void handleDelete()}>
+              确认删除
+            </button>
+          </div>
+        </Modal>
+      ) : null}
+
+      {modal?.kind === 'project-rename' ? (
+        <RenameModal
+          title={modal.title}
+          heading="重命名项目"
+          placeholder="输入项目显示名称"
+          onClose={() => setModal(null)}
+          onSubmit={handleRenameProject}
+        />
+      ) : null}
+
+      {modal?.kind === 'model' ? (
+        <ModelPicker
+          session={session}
+          onClose={() => setModal(null)}
+          onPickModel={(model) => void switchModel(model)}
+          onPickAgent={(agent) => void switchAgent(agent)}
+        />
+      ) : null}
+
+      {modal?.kind === 'image' ? (
+        <Modal title={modal.name || '图片'} onClose={() => setModal(null)} wide>
+          <img className="image-preview" src={modal.src} alt={modal.name || '图片'} />
+        </Modal>
+      ) : null}
+
+      {modal?.kind === 'revert' ? (
+        <Modal
+          title={modal.mode === 'regenerate' ? '重新生成回复' : '撤销上一轮'}
+          onClose={() => setModal(null)}
+        >
+          <p className="modal-text">
+            {modal.mode === 'regenerate'
+              ? '会先删除最后一条消息及其回复，再用相同内容重新发送，文件改动不会回退。'
+              : '会删除最后一条消息及其之后的全部回复，文件改动不会回退。'}
+          </p>
+          <div className="modal-actions">
+            <button className="ghost-button" onClick={() => setModal(null)}>
+              取消
+            </button>
+            <button
+              className={modal.mode === 'regenerate' ? 'primary-button' : 'danger-button'}
+              onClick={() =>
+                void (modal.mode === 'regenerate' ? handleRegenerate() : handleUndo())
+              }
+            >
+              确认
+            </button>
+          </div>
+        </Modal>
+      ) : null}
+
+      {toast ? <Toast text={toast.text} kind={toast.kind} /> : null}
+    </div>
+  )
+}
+
+function RenameModal({ title, heading = '重命名会话', placeholder = '输入会话标题', onClose, onSubmit }) {
+  const [value, setValue] = useState(title || '')
+  const inputRef = useRef(null)
+
+  useEffect(() => {
+    inputRef.current?.focus()
+    inputRef.current?.select()
+  }, [])
+
+  return (
+    <Modal title={heading} onClose={onClose}>
+      <input
+        ref={inputRef}
+        id="rename-input"
+        name="title"
+        className="text-input"
+        value={value}
+        onChange={(event) => setValue(event.target.value)}
+        onKeyDown={(event) => {
+          if (event.nativeEvent?.isComposing) return
+          if (event.key === 'Enter' && value.trim()) onSubmit(value.trim())
+        }}
+        placeholder={placeholder}
+        aria-label={placeholder}
+      />
+      <div className="modal-actions">
+        <button className="ghost-button" onClick={onClose}>
+          取消
+        </button>
+        <button
+          className="primary-button"
+          disabled={!value.trim()}
+          onClick={() => onSubmit(value.trim())}
+        >
+          保存
+        </button>
+      </div>
+    </Modal>
+  )
+}
