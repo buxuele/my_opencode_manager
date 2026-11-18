@@ -1,5 +1,6 @@
 const paths = {
   search: 'M11 4a7 7 0 1 0 0 14 7 7 0 0 0 0-14Zm9 16-4.2-4.2',
+  pin: 'M9 4h6l-1 6 3 3H7l3-3-1-6ZM12 13v7',
   refresh: 'M20 12a8 8 0 1 1-2.34-5.66M20 4v4h-4',
   chevronRight: 'm9 6 6 6-6 6',
   chevronDown: 'm6 9 6 6 6-6',
@@ -14,6 +15,7 @@ const paths = {
   x: 'm6 6 12 12M18 6 6 18',
   check: 'm5 13 4 4L19 7',
   plus: 'M12 5v14M5 12h14',
+  settings: 'M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6Zm7.4-3c0-.4 0-.9-.1-1.3l2-1.6-2-3.4-2.4 1a7.5 7.5 0 0 0-2.2-1.3L14.3 3h-4l-.4 2.4a7.5 7.5 0 0 0-2.2 1.3l-2.4-1-2 3.4 2 1.6a7.4 7.4 0 0 0 0 2.6l-2 1.6 2 3.4 2.4-1a7.5 7.5 0 0 0 2.2 1.3l.4 2.4h4l.4-2.4a7.5 7.5 0 0 0 2.2-1.3l2.4 1 2-3.4-2-1.6c.1-.4.1-.9.1-1.3Z',
   attach: 'M20.5 11.5 12.6 19.4a5.2 5.2 0 0 1-7.4-7.4l8.4-8.4a3.5 3.5 0 0 1 4.9 4.9l-8.4 8.4a1.9 1.9 0 1 1-2.6-2.6l7.7-7.7',
   alert: 'M12 4 2.5 20h19L12 4Zm0 5v6m0 3v.01',
   menu: 'M4 7h16M4 12h16M4 17h16',
@@ -62,7 +64,8 @@ export function Logo({ size = 30 }) {
   return (
     <span className="logo" style={{ width: size, height: size }}>
       <svg width={size * 0.58} height={size * 0.58} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-        <path d="m5 7 5 5-5 5M13 17h6" />
+        <path d="m5 7 5 5-5 5" />
+        <path d="M13 17h6" stroke="#6b3ff0" />
       </svg>
     </span>
   )

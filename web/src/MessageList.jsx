@@ -2,7 +2,7 @@ import { memo, useEffect, useMemo, useRef, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { Icon } from './Icons'
-import { basename, duration, formatClock, formatDate, modelLabel } from './format'
+import { duration, formatClock, formatElapsed, modelLabel } from './format'
 
 function Markdown({ children }) {
   return (
@@ -421,7 +421,7 @@ export default function MessageList({
             <div className="thinking-row">
               <span className="assistant-avatar">oc</span>
               <span className="thinking-text">正在执行</span>
-              {elapsed > 0 ? <span className="thinking-elapsed">{elapsed} 秒</span> : null}
+              {elapsed > 0 ? <span className="thinking-elapsed">{formatElapsed(elapsed)}</span> : null}
             </div>
           ) : null}
           <div ref={bottomRef} />
@@ -438,11 +438,11 @@ export default function MessageList({
 
 export function SessionHeader({
   session,
-  project,
   busy,
   onRename,
   onDelete,
   onOpenFolder,
+  onRun,
   onOpenModel,
   onCompact,
 }) {
@@ -451,38 +451,32 @@ export function SessionHeader({
   return (
     <header className="session-head">
       <div className="session-head-inner">
-        <div className="session-head-main">
-          <div className="session-title-row">
-            <h1>{info?.title || '未命名会话'}</h1>
-            {busy ? <span className="busy-pill"><span className="running-dot" />执行中</span> : null}
-            {info?.parentID ? <span className="soft-pill">子会话</span> : null}
-          </div>
-          <div className="session-meta-line">
-            <span>{project ? project.name || basename(project.canonical) : '未知项目'}</span>
-            <span className="dot-sep" />
-            <button className="model-button" onClick={onOpenModel} title="切换模型与 agent">
-              {info?.model ? modelLabel(info.model) : '默认模型'}
-            </button>
-            {info?.agent ? (
-              <>
-                <span className="dot-sep" />
-                <button className="model-button" onClick={onOpenModel} title="切换模型与 agent">
-                  agent {info.agent}
-                </button>
-              </>
-            ) : null}
-            <span className="dot-sep" />
-            <span className="created-at" title={formatDate(info?.time?.created)}>
-              创建于 {formatDate(info?.time?.created)}
+        <div className="session-head-line">
+          {busy ? (
+            <span className="busy-pill">
+              <span className="running-dot" />
+              执行中
             </span>
-            <span className="dot-sep" />
-            <button className="model-button" onClick={onCompact} title="压缩上下文">
-              压缩上下文
+          ) : null}
+          {info?.parentID ? <span className="soft-pill">子会话</span> : null}
+          <button className="model-button" onClick={onOpenModel} title="切换模型与 agent">
+            {info?.model ? modelLabel(info.model) : '默认模型'}
+          </button>
+          {info?.agent ? (
+            <button className="model-button" onClick={onOpenModel} title="切换模型与 agent">
+              agent {info.agent}
             </button>
-          </div>
+          ) : null}
+          <button className="model-button" onClick={onCompact} title="压缩上下文">
+            压缩上下文
+          </button>
         </div>
         <div className="session-actions">
-          <button className="ghost-button" onClick={onOpenFolder}>
+          <button className="ghost-button" onClick={onRun}>
+            <Icon name="play" size={16} />
+            运行
+          </button>
+          <button className="ghost-button" onClick={onOpenFolder} title="打开项目的上级目录">
             <Icon name="folder" size={16} />
             打开
           </button>

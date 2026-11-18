@@ -1,5 +1,7 @@
 import asyncio
 import json
+import os
+import shlex
 import subprocess
 from pathlib import Path
 
@@ -264,6 +266,16 @@ async def session_prompt(session_id: str, payload: dict = Body(...)):
     return await call("POST", f"/api/session/{session_id}/prompt", json=payload)
 
 
+@app.get("/api/commands")
+async def commands(directory: str = Query(...)):
+    return await call("GET", "/api/command", params={"location[directory]": directory})
+
+
+@app.post("/api/sessions/{session_id}/command")
+async def session_command(session_id: str, payload: dict = Body(...)):
+    return await call("POST", f"/api/session/{session_id}/command", json=payload)
+
+
 @app.post("/api/sessions/{session_id}/interrupt")
 async def session_interrupt(session_id: str):
     return await call("POST", f"/api/session/{session_id}/interrupt")
@@ -319,10 +331,46 @@ async def events(
     )
 
 
+@app.post("/api/run")
+async def run_project(payload: dict = Body(...)):
+    raw_path = str(payload.get("path", "")).strip()
+    if not raw_path:
+        raise HTTPException(status_code=400, detail="缺少目录路径")
+    directory = Path(raw_path).expanduser()
+    if not directory.is_dir():
+        raise HTTPException(status_code=404, detail=f"目录不存在：{directory}")
+    script = directory / "just_run.sh"
+    if not script.is_file():
+        raise HTTPException(status_code=404, detail="项目目录没有 just_run.sh")
+    command = f"cd {shlex.quote(str(directory))} && ./just_run.sh"
+    if not os.access(script, os.X_OK):
+        command = f"cd {shlex.quote(str(directory))} && bash just_run.sh"
+    title = f"{directory.name} · just_run.sh"
+    escaped = command.replace("\\", "\\\\").replace('"', '\\"')
+    escaped_title = title.replace("\\", "\\\\").replace('"', '\\"')
+    applescript = (
+        'tell application "Terminal"\n'
+        "activate\n"
+        f'do script "{escaped}"\n'
+        f'set custom title of selected tab of front window to "{escaped_title}"\n'
+        "set title displays custom title of selected tab of front window to true\n"
+        "set frontmost of front window to true\n"
+        "end tell"
+    )
+    result = subprocess.run(
+        ["osascript", "-e", applescript], capture_output=True, text=True, timeout=10
+    )
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "").strip()
+        raise HTTPException(status_code=500, detail=f"打开终端失败：{detail or '未知错误'}")
+    return {"ok": True, "directory": str(directory), "title": title}
+
+
 @app.post("/api/reveal")
 async def reveal(payload: dict = Body(...)):
     raw_path = str(payload.get("path", "")).strip()
     target = str(payload.get("target", "finder"))
+    select = bool(payload.get("select"))
     if not raw_path:
         raise HTTPException(status_code=400, detail="缺少目录路径")
     directory = Path(raw_path).expanduser()
@@ -330,9 +378,27 @@ async def reveal(payload: dict = Body(...)):
         raise HTTPException(status_code=404, detail=f"目录不存在：{directory}")
     if target == "terminal":
         subprocess.Popen(["open", "-a", "Terminal", str(directory)])
+        return {"ok": True, "directory": str(directory)}
+    escaped = str(directory).replace("\\", "\\\\").replace('"', '\\"')
+    if select:
+        body = (
+            "activate\n"
+            f'set targetItem to (POSIX file "{escaped}" as alias)\n'
+            "reveal targetItem\n"
+            "select targetItem\n"
+            "activate\n"
+        )
     else:
-        subprocess.Popen(["open", str(directory)])
-    return {"ok": True, "directory": str(directory)}
+        body = "activate\n" f'open (POSIX file "{escaped}" as alias)\n'
+    applescript = 'tell application "Finder"\n' f"{body}" "end tell"
+    result = subprocess.run(
+        ["osascript", "-e", applescript], capture_output=True, text=True, timeout=10
+    )
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "").strip()
+        raise HTTPException(status_code=500, detail=f"打开访达失败：{detail or '未知错误'}")
+    opened = str(directory.parent) if select else str(directory)
+    return {"ok": True, "directory": opened, "selected": str(directory) if select else None}
 
 
 if (DIST / "assets").is_dir():

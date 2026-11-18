@@ -1,6 +1,7 @@
 import json
 import os
 import sys
+import tempfile
 
 import httpx
 
@@ -40,6 +41,13 @@ def main():
     check("模型列表", len(model_list.get("data", [])) > 0, f"{len(model_list['data'])} 个")
     agent_list = client.get("/api/agents", params={"directory": target["canonical"]}).json()
     check("Agent 列表", len(agent_list.get("data", [])) > 0, f"{len(agent_list['data'])} 个")
+    with tempfile.TemporaryDirectory() as empty_dir:
+        no_script = client.post("/api/run", json={"path": empty_dir})
+    check(
+        "运行缺少脚本",
+        no_script.status_code == 404 and "just_run.sh" in str(no_script.json().get("detail")),
+        str(no_script.status_code),
+    )
     created = client.post(
         "/api/sessions", json={"location": {"directory": target["canonical"]}}
     ).json()["data"]
@@ -81,6 +89,14 @@ def main():
         json={"decision": "reject"},
     )
     check("授权回复接口", permission_reply.status_code == 404, str(permission_reply.status_code))
+
+    commands = client.get("/api/commands", params={"directory": target["canonical"]}).json()
+    check("命令列表", isinstance(commands.get("data"), list), f"{len(commands.get('data', []))} 个")
+    missing_command = client.post(
+        f"/api/sessions/{created['id']}/command",
+        json={"name": "__missing__", "arguments": "", "text": "/__missing__"},
+    )
+    check("未知命令返回 404", missing_command.status_code == 404, str(missing_command.status_code))
 
     forms = client.get(f"/api/sessions/{created['id']}/forms").json()
     check("表单列表", isinstance(forms.get("data"), list))
@@ -137,6 +153,9 @@ def main():
         index.status_code == 200 and "<title>opencode</title>" in index.text,
         f"{len(index.text)} 字节",
     )
+
+    missing = client.post("/api/reveal", json={"path": "/tmp/不存在的目录xyz"})
+    check("打开目录缺路径报错", missing.status_code == 404, str(missing.status_code))
 
     with client.stream(
         "GET", "/api/events", params=[("types", "session.created")], timeout=10.0

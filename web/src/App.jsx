@@ -8,6 +8,24 @@ import Modal from './Modal'
 import Toast from './Toast'
 import { Icon, Logo } from './Icons'
 import { basename } from './format'
+import { playCompletionSound, unlockAudio } from './sound'
+
+const autoAllowedPermissions = new Set()
+
+async function autoAllowPermissions(sessionId, permissions) {
+  for (const request of permissions || []) {
+    if (!request?.id || autoAllowedPermissions.has(request.id)) continue
+    autoAllowedPermissions.add(request.id)
+    try {
+      await api(`/sessions/${sessionId}/permissions/${request.id}/reply`, {
+        method: 'POST',
+        body: JSON.stringify({ decision: 'always' }),
+      })
+    } catch {
+      autoAllowedPermissions.delete(request.id)
+    }
+  }
+}
 
 const EVENT_TYPES = [
   'session.created',
@@ -111,6 +129,83 @@ function routeHash(view, selectedProject) {
   return '#/'
 }
 
+const DEFAULT_SETTINGS = { completionSound: true, background: '#f2f2f2' }
+
+const LEGACY_BACKGROUNDS = {
+  light: '#fafafa',
+  mid: '#f2f2f2',
+  deep: '#e5e5e5',
+}
+
+const GRAY_MIN = 90
+const GRAY_MAX = 100
+
+function normalizeBackground(value) {
+  const legacy = LEGACY_BACKGROUNDS[value]
+  if (legacy) return legacy
+  if (!/^#[0-9a-f]{6}$/i.test(value || '')) return DEFAULT_SETTINGS.background
+  const gray = parseInt(value.slice(1), 16)
+  const channel = Math.max(
+    230,
+    Math.min(255, Math.round((((gray >> 16) & 255) + ((gray >> 8) & 255) + (gray & 255)) / 3)),
+  )
+  const hex = channel.toString(16).padStart(2, '0')
+  return `#${hex}${hex}${hex}`
+}
+
+function backgroundPercent(value) {
+  const channel = parseInt(normalizeBackground(value).slice(1, 3), 16)
+  return Math.round((channel / 255) * 100)
+}
+
+function backgroundFromPercent(percent) {
+  const level = Math.max(GRAY_MIN, Math.min(GRAY_MAX, Math.round(Number(percent) || 95)))
+  const channel = Math.round((level / 100) * 255)
+  const hex = channel.toString(16).padStart(2, '0')
+  return `#${hex}${hex}${hex}`
+}
+
+function shadeColor(hex, ratio) {
+  const value = parseInt(hex.slice(1), 16)
+  const channel = (shift) => {
+    const base = (value >> shift) & 255
+    return Math.max(0, Math.min(255, Math.round(base * (1 + ratio))))
+  }
+  return `#${[16, 8, 0]
+    .map((shift) => channel(shift).toString(16).padStart(2, '0'))
+    .join('')}`
+}
+
+const PINNED_KEY = 'ocm_pinned_projects'
+
+function loadPinnedProjects() {
+  try {
+    const raw = window.localStorage.getItem(PINNED_KEY)
+    const list = raw ? JSON.parse(raw) : []
+    return Array.isArray(list) ? list.filter((item) => typeof item === 'string') : []
+  } catch {
+    return []
+  }
+}
+
+function loadSettings() {
+  try {
+    const raw = window.localStorage.getItem('ocm_settings')
+    const stored = raw ? JSON.parse(raw) : {}
+    return { ...DEFAULT_SETTINGS, ...stored, background: normalizeBackground(stored.background) }
+  } catch {
+    return { ...DEFAULT_SETTINGS }
+  }
+}
+
+function saveSettings(settings) {
+  try {
+    window.localStorage.setItem('ocm_settings', JSON.stringify(settings))
+  } catch {
+    /* 浏览器禁用存储时只在本次会话生效 */
+  }
+}
+
 export default function App() {
   const initialRoute = useMemo(() => readRoute(), [])
   const [projects, setProjects] = useState([])
@@ -144,11 +239,14 @@ export default function App() {
   const [modal, setModal] = useState(null)
   const [toast, setToast] = useState(null)
   const [now, setNow] = useState(Date.now())
+  const [settings, setSettings] = useState(loadSettings)
+  const [pinned, setPinned] = useState(loadPinnedProjects)
 
   const viewRef = useRef(view)
   const activeRef = useRef(active)
   const sessionRef = useRef(session)
   const sessionsRef = useRef(sessions)
+  const settingsRef = useRef(settings)
   const messageToken = useRef(0)
   const toastTimer = useRef(null)
   const creatingRef = useRef(false)
@@ -171,6 +269,28 @@ export default function App() {
   useEffect(() => {
     sessionsRef.current = sessions
   }, [sessions])
+
+  useEffect(() => {
+    settingsRef.current = settings
+  }, [settings])
+
+  useEffect(() => {
+    const background = normalizeBackground(settings.background)
+    document.documentElement.style.setProperty('--bg', background)
+    document.documentElement.style.setProperty('--sidebar-bg', shadeColor(background, -0.2))
+    const meta = document.querySelector('meta[name="theme-color"]')
+    if (meta) meta.setAttribute('content', background)
+  }, [settings.background])
+
+  useEffect(() => {
+    const unlock = () => unlockAudio()
+    window.addEventListener('pointerdown', unlock, { once: true })
+    window.addEventListener('keydown', unlock, { once: true })
+    return () => {
+      window.removeEventListener('pointerdown', unlock)
+      window.removeEventListener('keydown', unlock)
+    }
+  }, [])
 
   useEffect(() => {
     const previous = prevActiveRef.current
@@ -222,6 +342,34 @@ export default function App() {
     toastTimer.current = setTimeout(() => setToast(null), 4600)
   }, [])
 
+  const toggleCompletionSound = () => {
+    const next = { ...settings, completionSound: !settings.completionSound }
+    setSettings(next)
+    saveSettings(next)
+    if (next.completionSound) playCompletionSound()
+  }
+
+  const chooseBackground = (percent) => {
+    const next = { ...settings, background: backgroundFromPercent(percent) }
+    setSettings(next)
+    saveSettings(next)
+  }
+
+  const togglePinProject = (project) => {
+    if (!project?.id) return
+    setPinned((prev) => {
+      const next = prev.includes(project.id)
+        ? prev.filter((id) => id !== project.id)
+        : [...prev, project.id]
+      try {
+        window.localStorage.setItem(PINNED_KEY, JSON.stringify(next))
+      } catch {
+        /* 浏览器禁用存储时只在本次会话生效 */
+      }
+      return next
+    })
+  }
+
   const loadSessions = useCallback(async () => {
     const [live, activeMap] = await Promise.all([
       api('/sessions?limit=1000'),
@@ -240,13 +388,17 @@ export default function App() {
       permissions: permissionResult?.data || [],
       forms: formResult?.data || [],
     })
+    void autoAllowPermissions(sessionId, permissionResult?.data || [])
   }, [])
 
   const loadAttention = useCallback(async () => {
     const ids = Array.from(
       new Set([
         ...Object.keys(activeRef.current || {}),
-        ...sessionsRef.current.slice(0, 20).map((item) => item.id),
+        ...sessionsRef.current
+          .filter((item) => (item.time?.updated || 0) > Date.now() - 30 * 60 * 1000)
+          .slice(0, 5)
+          .map((item) => item.id),
       ]),
     )
     if (ids.length === 0) {
@@ -260,6 +412,7 @@ export default function App() {
           api(`/sessions/${id}/forms`).catch(() => ({ data: [] })),
         ])
         const count = (permissionResult?.data?.length || 0) + (formResult?.data?.length || 0)
+        void autoAllowPermissions(id, permissionResult?.data || [])
         return [id, count]
       }),
     )
@@ -536,6 +689,9 @@ export default function App() {
         type === 'session.execution.interrupted'
       ) {
         const executed = payload?.data?.sessionID
+        if (type === 'session.execution.succeeded' && settingsRef.current.completionSound) {
+          playCompletionSound()
+        }
         if (
           executed &&
           (type === 'session.execution.succeeded' || type === 'session.execution.failed')
@@ -641,13 +797,15 @@ export default function App() {
       const stamp = item.time?.updated || 0
       if (stamp > (latest.get(item.projectID) || 0)) latest.set(item.projectID, stamp)
     })
+    const pinnedSet = new Set(pinned)
     return list
       .slice()
       .sort(
         (a, b) =>
+          Number(pinnedSet.has(b.id)) - Number(pinnedSet.has(a.id)) ||
           (latest.get(b.id) || b.time?.active || 0) - (latest.get(a.id) || a.time?.active || 0),
       )
-  }, [visibleProjects, query, sessions])
+  }, [visibleProjects, query, sessions, pinned])
 
   const allSessions = useMemo(
     () =>
@@ -832,6 +990,27 @@ export default function App() {
     const current = viewRef.current
     if (current.kind !== 'session') return false
     const sessionId = current.id
+    const command = /^\/([^\s]+)\s*([\s\S]*)$/.exec(text.trim())
+    if (command && attachments.length === 0) {
+      setSending(true)
+      try {
+        await api(`/sessions/${sessionId}/command`, {
+          method: 'POST',
+          body: JSON.stringify({
+            name: command[1],
+            arguments: command[2].trim(),
+            text: text.trim(),
+          }),
+        })
+        void loadSessions().catch(() => {})
+        return true
+      } catch (error) {
+        notify(error.message)
+        return false
+      } finally {
+        setSending(false)
+      }
+    }
     const running = Boolean(activeRef.current[sessionId])
     const tempId = `local_${Date.now()}`
     const files = attachments.map((item) => ({
@@ -1154,6 +1333,45 @@ export default function App() {
     }
   }
 
+  const runProject = async (item) => {
+    const directory =
+      item?.location?.directory || projectById.get(item?.projectID || '')?.canonical
+    if (!directory) {
+      notify('找不到项目目录')
+      return
+    }
+    try {
+      const result = await api('/run', {
+        method: 'POST',
+        body: JSON.stringify({ path: directory }),
+      })
+      notify(`已在终端运行：${result?.title || 'just_run.sh'}`, 'success')
+    } catch (error) {
+      notify(error.message)
+    }
+  }
+
+  const openParentFolder = async (item) => {
+    const directory =
+      item?.location?.directory || projectById.get(item?.projectID || '')?.canonical
+    if (!directory) {
+      notify('找不到项目目录')
+      return
+    }
+    const normalized = directory.replace(/\/+$/, '')
+    const split = normalized.lastIndexOf('/')
+    const parent = split > 0 ? normalized.slice(0, split) : '/'
+    try {
+      await api('/reveal', {
+        method: 'POST',
+        body: JSON.stringify({ path: normalized, target: 'finder', select: true }),
+      })
+      notify(`已打开上级目录并选中项目文件夹：${parent}`, 'success')
+    } catch (error) {
+      notify(error.message)
+    }
+  }
+
   const openSessionFolder = async (item) => {
     const directory =
       item?.location?.directory || projectById.get(item?.projectID || '')?.canonical
@@ -1252,6 +1470,8 @@ export default function App() {
         onNewSessionInProject={(project) => void createSession(project)}
         onOpenProjectFolder={(project, target) => void openFinder(target, project)}
         onCopyProjectCommand={(project) => void copyCommand(project)}
+        pinned={pinned}
+        onTogglePin={togglePinProject}
         onRenameProject={(project) =>
           setModal({
             kind: 'project-rename',
@@ -1298,6 +1518,14 @@ export default function App() {
             </span>
             <button className="icon-button" onClick={() => void refreshCurrent()} aria-label="刷新数据">
               <Icon name="refresh" />
+            </button>
+            <button
+              className="icon-button"
+              onClick={() => setModal({ kind: 'settings' })}
+              aria-label="设置"
+              title="设置"
+            >
+              <Icon name="settings" />
             </button>
           </div>
         </header>
@@ -1360,7 +1588,8 @@ export default function App() {
               onReplyForm={replyForm}
               onCancelForm={cancelForm}
               onOpenModel={() => setModal({ kind: 'model' })}
-              onOpenFolder={() => void openSessionFolder(session?.info)}
+              onOpenFolder={() => void openParentFolder(session?.info)}
+              onRun={() => void runProject(session?.info)}
               onCompact={() => void compactSession()}
               onUndo={() => setModal({ kind: 'revert', mode: 'undo' })}
               onRegenerate={() => setModal({ kind: 'revert', mode: 'regenerate' })}
@@ -1415,6 +1644,55 @@ export default function App() {
           onPickModel={(model) => void switchModel(model)}
           onPickAgent={(agent) => void switchAgent(agent)}
         />
+      ) : null}
+
+      {modal?.kind === 'settings' ? (
+        <Modal title="设置" onClose={() => setModal(null)}>
+          <div className="settings-row">
+            <div className="settings-copy">
+              <strong>会话完成提示音</strong>
+              <span>会话执行完成时播放轻提示音，默认开启。</span>
+            </div>
+            <div className="settings-actions">
+              <button className="ghost-button" onClick={() => playCompletionSound()}>
+                试听
+              </button>
+              <button
+                className={`switch ${settings.completionSound ? 'on' : ''}`}
+                onClick={toggleCompletionSound}
+                role="switch"
+                aria-checked={settings.completionSound}
+                aria-label="会话完成提示音"
+              >
+                <span className="switch-knob" />
+              </button>
+            </div>
+          </div>
+          <div className="settings-row settings-row-theme">
+            <div className="settings-copy">
+              <strong>背景颜色</strong>
+            </div>
+            <label className="gray-slider">
+              <input
+                type="range"
+                min={GRAY_MIN}
+                max={GRAY_MAX}
+                step="1"
+                value={backgroundPercent(settings.background)}
+                onChange={(event) => chooseBackground(event.target.value)}
+                aria-label="背景灰度"
+              />
+              <span className="gray-slider-value">
+                {backgroundPercent(settings.background)}%
+              </span>
+            </label>
+          </div>
+          <div className="modal-actions">
+            <button className="primary-button" onClick={() => setModal(null)}>
+              完成
+            </button>
+          </div>
+        </Modal>
       ) : null}
 
       {modal?.kind === 'image' ? (

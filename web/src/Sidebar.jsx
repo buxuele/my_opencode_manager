@@ -32,6 +32,8 @@ export default function Sidebar({
   onOpenProjectFolder,
   onCopyProjectCommand,
   onRenameProject,
+  pinned,
+  onTogglePin,
 }) {
   const searchRef = useRef(null)
   const scrollRef = useRef(null)
@@ -57,6 +59,14 @@ export default function Sidebar({
 
   const keyword = query.trim().toLowerCase()
 
+  const activeProjects = useMemo(() => {
+    const set = new Set()
+    sessions.forEach((item) => {
+      if (active[item.id]) set.add(item.projectID)
+    })
+    return set
+  }, [sessions, active])
+
   useEffect(() => {
     if (!menu) return
     const close = (event) => {
@@ -81,7 +91,7 @@ export default function Sidebar({
   const openMenu = (event, project) => {
     event.preventDefault()
     const width = 200
-    const height = 224
+    const height = 268
     setMenu({
       project,
       x: Math.max(8, Math.min(event.clientX, window.innerWidth - width - 8)),
@@ -228,7 +238,9 @@ export default function Sidebar({
                 title={shortPath(project.canonical)}
                 aria-expanded={isOpen}
               >
-                <span className="project-avatar">{(name || '?').slice(0, 1).toUpperCase()}</span>
+                {activeProjects.has(project.id) ? (
+                  <span className="running-dot project-running-dot" />
+                ) : null}
                 <span className="project-name">{name}</span>
                 <span className="project-count">{count}</span>
                 <span className="project-chevron">
@@ -318,6 +330,14 @@ export default function Sidebar({
           >
             <Icon name="plus" size={15} />
             <span>新建会话</span>
+          </button>
+          <button
+            className="context-item"
+            role="menuitem"
+            onClick={() => runMenuAction(onTogglePin, menu.project)}
+          >
+            <Icon name="pin" size={15} />
+            <span>{pinned.includes(menu.project.id) ? '取消置顶' : '置顶项目'}</span>
           </button>
           <button
             className="context-item"

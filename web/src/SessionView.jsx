@@ -24,6 +24,7 @@ export default function SessionView({
   onCancelForm,
   onOpenModel,
   onOpenFolder,
+  onRun,
   onCompact,
   onUndo,
   onRegenerate,
@@ -60,12 +61,12 @@ export default function SessionView({
     <div className="session-view">
       <SessionHeader
         session={session}
-        project={project}
         busy={busy}
         onRename={onRename}
         onDelete={onDelete}
         onOpenFolder={onOpenFolder}
         onOpenModel={onOpenModel}
+        onRun={onRun}
         onCompact={onCompact}
       />
       <MessageList
