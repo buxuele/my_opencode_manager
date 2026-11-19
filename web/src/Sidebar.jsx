@@ -2,8 +2,6 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { Icon, Logo } from './Icons'
 import { basename, relativeTime, shortPath } from './format'
 
-const PREVIEW_COUNT = 5
-
 export default function Sidebar({
   projects,
   projectById,
@@ -26,7 +24,6 @@ export default function Sidebar({
   onClose,
   now,
   onCreateSession,
-  onOpenFolder,
   onGoHome,
   onNewSessionInProject,
   onOpenProjectFolder,
@@ -34,6 +31,8 @@ export default function Sidebar({
   onRenameProject,
   pinned,
   onTogglePin,
+  onRefresh,
+  onOpenSettings,
 }) {
   const searchRef = useRef(null)
   const scrollRef = useRef(null)
@@ -47,6 +46,13 @@ export default function Sidebar({
   }, [selectedProject, query])
 
   useEffect(() => {
+    if (!activeSessionId) return
+    const owner = sessions.find((item) => item.id === activeSessionId)?.projectID
+    if (!owner) return
+    setExpanded((prev) => (prev.has(owner) ? prev : new Set(prev).add(owner)))
+  }, [activeSessionId, sessions])
+
+  useEffect(() => {
     const handler = (event) => {
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
         event.preventDefault()
@@ -58,51 +64,6 @@ export default function Sidebar({
   }, [])
 
   const keyword = query.trim().toLowerCase()
-
-  const activeProjects = useMemo(() => {
-    const set = new Set()
-    sessions.forEach((item) => {
-      if (active[item.id]) set.add(item.projectID)
-    })
-    return set
-  }, [sessions, active])
-
-  useEffect(() => {
-    if (!menu) return
-    const close = (event) => {
-      if (event.type === 'pointerdown' && menuRef.current?.contains(event.target)) return
-      setMenu(null)
-    }
-    const onKey = (event) => {
-      if (event.key === 'Escape') setMenu(null)
-    }
-    window.addEventListener('pointerdown', close)
-    window.addEventListener('keydown', onKey)
-    window.addEventListener('resize', close)
-    window.addEventListener('scroll', close, true)
-    return () => {
-      window.removeEventListener('pointerdown', close)
-      window.removeEventListener('keydown', onKey)
-      window.removeEventListener('resize', close)
-      window.removeEventListener('scroll', close, true)
-    }
-  }, [menu])
-
-  const openMenu = (event, project) => {
-    event.preventDefault()
-    const width = 200
-    const height = 268
-    setMenu({
-      project,
-      x: Math.max(8, Math.min(event.clientX, window.innerWidth - width - 8)),
-      y: Math.max(8, Math.min(event.clientY, window.innerHeight - height - 8)),
-    })
-  }
-
-  const runMenuAction = (handler, project) => {
-    setMenu(null)
-    handler(project)
-  }
 
   const sessionsByProject = useMemo(() => {
     const map = new Map()
@@ -153,12 +114,49 @@ export default function Sidebar({
     })
   }
 
-  const onProjectClick = (project) => {
-    if (keyword) {
-      onSelectProject(project.id)
-      return
+  const activeProjects = useMemo(() => {
+    const set = new Set()
+    sessions.forEach((item) => {
+      if (active[item.id]) set.add(item.projectID)
+    })
+    return set
+  }, [sessions, active])
+
+  useEffect(() => {
+    if (!menu) return
+    const close = (event) => {
+      if (event.type === 'pointerdown' && menuRef.current?.contains(event.target)) return
+      setMenu(null)
     }
-    toggleProject(project.id)
+    const onKey = (event) => {
+      if (event.key === 'Escape') setMenu(null)
+    }
+    window.addEventListener('pointerdown', close)
+    window.addEventListener('keydown', onKey)
+    window.addEventListener('resize', close)
+    window.addEventListener('scroll', close, true)
+    return () => {
+      window.removeEventListener('pointerdown', close)
+      window.removeEventListener('keydown', onKey)
+      window.removeEventListener('resize', close)
+      window.removeEventListener('scroll', close, true)
+    }
+  }, [menu])
+
+  const openMenu = (event, project) => {
+    event.preventDefault()
+    const width = 200
+    const height = 268
+    setMenu({
+      project,
+      x: Math.max(8, Math.min(event.clientX, window.innerWidth - width - 8)),
+      y: Math.max(8, Math.min(event.clientY, window.innerHeight - height - 8)),
+    })
+  }
+
+  const runMenuAction = (handler, project) => {
+    setMenu(null)
+    handler(project)
   }
 
   return (
@@ -227,26 +225,34 @@ export default function Sidebar({
           const visible = keyword ? list.filter((item) => matchedIds.has(item.id)) : list
           const isOpen = keyword ? visible.length > 0 : expanded.has(project.id)
           const showAll = revealed.has(project.id)
-          const shown = showAll ? visible : visible.slice(0, PREVIEW_COUNT)
+          const shown = showAll ? visible : visible.slice(0, 5)
           const restCount = visible.length - shown.length
           return (
             <div className="project-block" key={project.id}>
-              <button
+              <div
                 className={`project-row ${selectedProject === project.id ? 'active' : ''}`}
-                onClick={() => onProjectClick(project)}
                 onContextMenu={(event) => openMenu(event, project)}
-                title={shortPath(project.canonical)}
-                aria-expanded={isOpen}
               >
-                {activeProjects.has(project.id) ? (
-                  <span className="running-dot project-running-dot" />
-                ) : null}
-                <span className="project-name">{name}</span>
+                <button
+                  className="project-open"
+                  onClick={() => toggleProject(project.id)}
+                  title={shortPath(project.canonical)}
+                >
+                  {activeProjects.has(project.id) ? (
+                    <span className="running-dot project-running-dot" />
+                  ) : null}
+                  <span className="project-name">{name}</span>
+                </button>
                 <span className="project-count">{count}</span>
-                <span className="project-chevron">
+                <button
+                  className="project-expand"
+                  onClick={() => toggleProject(project.id)}
+                  aria-expanded={isOpen}
+                  aria-label={isOpen ? `收起 ${name}` : `展开 ${name}`}
+                >
                   <Icon name={isOpen ? 'chevronDown' : 'chevronRight'} size={15} />
-                </span>
-              </button>
+                </button>
+              </div>
 
               {isOpen ? (
                 <div className="project-sessions">
@@ -254,41 +260,32 @@ export default function Sidebar({
                     const running = Boolean(active[item.id])
                     const stamp = relativeTime(item.time?.updated, now)
                     return (
-                      <div className="project-session-wrap" key={item.id}>
-                        <button
-                          className={`project-session ${
-                            activeSessionId === item.id ? 'active' : ''
-                          }`}
-                          onClick={() => onOpenSession(item.id, item.projectID)}
-                          title={`${item.title || '未命名会话'} · ${stamp}`}
-                        >
-                          {running ? <span className="running-dot" /> : null}
-                          <span className="project-session-title">
-                            {item.title || '未命名会话'}
+                      <button
+                        key={item.id}
+                        className={`project-session ${
+                          activeSessionId === item.id ? 'active' : ''
+                        }`}
+                        onClick={() => onOpenSession(item.id, item.projectID)}
+                        title={`${item.title || '未命名会话'} · ${stamp}`}
+                      >
+                        {running ? <span className="running-dot" /> : null}
+                        <span className="project-session-title">
+                          {item.title || '未命名会话'}
+                        </span>
+                        {attention?.[item.id] ? (
+                          <span className="attention-badge">待处理</span>
+                        ) : null}
+                        {completed?.[item.id] ? (
+                          <span
+                            className={`done-badge ${
+                              completed[item.id] === 'failed' ? 'failed' : ''
+                            }`}
+                          >
+                            {completed[item.id] === 'failed' ? '失败' : '已完成'}
                           </span>
-                          {attention?.[item.id] ? (
-                            <span className="attention-badge">待处理</span>
-                          ) : null}
-                          {completed?.[item.id] ? (
-                            <span
-                              className={`done-badge ${
-                                completed[item.id] === 'failed' ? 'failed' : ''
-                              }`}
-                            >
-                              {completed[item.id] === 'failed' ? '失败' : '已完成'}
-                            </span>
-                          ) : null}
-                        </button>
-                        <button
-                          className="project-session-folder"
-                          onPointerDown={(event) => event.stopPropagation()}
-                          onClick={() => onOpenFolder(item)}
-                          aria-label="打开项目文件夹"
-                          title="打开项目文件夹"
-                        >
-                          <Icon name="folder" size={14} />
-                        </button>
-                      </div>
+                        ) : null}
+                        <span className="project-session-time">{stamp}</span>
+                      </button>
                     )
                   })}
 
@@ -297,7 +294,7 @@ export default function Sidebar({
                       更多 {restCount} 个
                     </button>
                   ) : null}
-                  {showAll && visible.length > PREVIEW_COUNT ? (
+                  {showAll && visible.length > 5 ? (
                     <button className="project-more" onClick={() => toggleRevealed(project.id)}>
                       收起
                     </button>
@@ -342,6 +339,14 @@ export default function Sidebar({
           <button
             className="context-item"
             role="menuitem"
+            onClick={() => runMenuAction((item) => onSelectProject(item.id), menu.project)}
+          >
+            <Icon name="chevronRight" size={15} />
+            <span>打开项目页</span>
+          </button>
+          <button
+            className="context-item"
+            role="menuitem"
             onClick={() => runMenuAction((item) => onOpenProjectFolder(item, 'finder'), menu.project)}
           >
             <Icon name="folder" size={15} />
@@ -378,14 +383,28 @@ export default function Sidebar({
       ) : null}
 
       <footer className="sidebar-footer">
+        <div className="sidebar-globals">
+          <span className={`live-pill ${liveConnected ? 'on' : 'off'}`}>
+            <span className="live-dot" />
+            <span className="live-label">{liveConnected ? '实时同步' : '实时断开'}</span>
+          </span>
+          <button className="icon-button" onClick={onRefresh} aria-label="刷新数据">
+            <Icon name="refresh" />
+          </button>
+          <button
+            className="icon-button"
+            onClick={onOpenSettings}
+            aria-label="设置"
+            title="设置"
+          >
+            <Icon name="settings" />
+          </button>
+        </div>
         <div className="service-line">
           <span className={`live-dot ${service?.reachable ? '' : 'bad'}`} />
-          <span>{service?.reachable ? 'opencode 服务在线' : '服务离线'}</span>
+          <span>{service?.reachable ? '服务在线' : '服务离线'}</span>
+          <span className="foot-meta">{activeCount} 个运行中</span>
           <span className="service-version">v{service?.version || '未知'}</span>
-        </div>
-        <div className="service-foot">
-          <span>{liveConnected ? '事件流已连接' : '事件流断开'}</span>
-          <span>{activeCount} 个会话运行中</span>
         </div>
       </footer>
     </aside>

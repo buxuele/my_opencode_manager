@@ -31,6 +31,7 @@ export default function SessionView({
   onOpenAttachment,
   sending,
   project,
+  breadcrumb,
 }) {
   const ready = session && session.info && session.info.id === sessionId
 
@@ -62,12 +63,12 @@ export default function SessionView({
       <SessionHeader
         session={session}
         busy={busy}
+        breadcrumb={breadcrumb}
         onRename={onRename}
         onDelete={onDelete}
         onOpenFolder={onOpenFolder}
         onOpenModel={onOpenModel}
         onRun={onRun}
-        onCompact={onCompact}
       />
       <MessageList
         messages={session.messages}
@@ -80,6 +81,7 @@ export default function SessionView({
         onLoadOlder={onLoadOlder}
         onUndo={onUndo}
         onRegenerate={onRegenerate}
+        onCompact={onCompact}
         onOpenAttachment={onOpenAttachment}
       />
       <Pending
@@ -96,6 +98,9 @@ export default function SessionView({
         busy={busy}
         sending={sending}
         stopping={stopping}
+        model={session.info?.model}
+        agent={session.info?.agent}
+        onOpenModel={onOpenModel}
       />
     </div>
   )

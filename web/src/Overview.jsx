@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { Icon } from './Icons'
 import {
   basename,
@@ -39,6 +39,9 @@ export default function Overview({
   onRenameProject,
   query,
   now,
+  breadcrumb,
+  attention,
+  completed,
 }) {
   const [sort, setSort] = useState('updated')
 
@@ -65,17 +68,44 @@ export default function Overview({
     if (page !== currentPage) onPageChange(currentPage)
   }, [page, currentPage, onPageChange])
 
+  const scrollRef = useRef(null)
+  useEffect(() => {
+    scrollRef.current?.scrollTo({ top: 0 })
+  }, [currentPage, sort, project?.id])
+
   const name = project ? project.name || basename(project.canonical) : '全部项目'
   const pageItems = pageWindow(currentPage, totalPages)
 
   return (
-    <div className={`overview ${project ? '' : 'list-only'}`}>
+    <div className={`overview ${project ? '' : 'list-only'}`} ref={scrollRef}>
+      <div className="overview-bar">
+        {breadcrumb}
+        <span className="bar-sep" />
+        <span className="list-count">
+          {query ? `搜索“${query}”命中 ${sorted.length} 个` : `${sorted.length} 条会话`}
+        </span>
+        <div className="bar-actions">
+            <button className="ghost-button" onClick={onCreateSession}>
+              <Icon name="plus" size={16} />
+              新建会话
+            </button>
+            <select
+              className="select"
+              id="session-sort"
+              name="sort"
+              value={sort}
+              onChange={(event) => setSort(event.target.value)}
+              aria-label="排序方式"
+            >
+              <option value="updated">按更新时间</option>
+              <option value="created">按创建时间</option>
+            </select>
+        </div>
+      </div>
       {project ? (
         <>
           <section className="project-hero">
             <div className="hero-main">
-              <span className="eyebrow">项目</span>
-              <h1>{name}</h1>
               <p className="hero-path" title={project.canonical}>
                 {shortPath(project.canonical)}
               </p>
@@ -103,31 +133,6 @@ export default function Overview({
       ) : null}
 
       <section className="session-section">
-        <div className="list-toolbar">
-          <div className="list-title">
-            <h2>会话</h2>
-            <span className="muted-text">
-              {query ? `搜索“${query}”命中 ${sorted.length} 个` : `共 ${sorted.length} 个会话`}
-            </span>
-          </div>
-          <div className="toolbar-actions">
-            <button className="ghost-button" onClick={onCreateSession}>
-              <Icon name="plus" size={16} />
-              新建会话
-            </button>
-            <select
-              className="select"
-              id="session-sort"
-              name="sort"
-              value={sort}
-              onChange={(event) => setSort(event.target.value)}
-              aria-label="排序方式"
-            >
-              <option value="updated">按更新时间</option>
-              <option value="created">按创建时间</option>
-            </select>
-          </div>
-        </div>
 
         {visible.length === 0 ? (
           <div className="empty-block">
@@ -151,13 +156,25 @@ export default function Overview({
                       {isRunning ? <span className="running-dot" /> : null}
                       {item.title || '未命名会话'}
                     </span>
-                    <span className="session-card-meta">
-                      {!project ? `${projectInfo ? projectInfo.name || basename(projectInfo.canonical) : '未知项目'} · ` : ''}
-                      {modelLabel(item.model)}
-                      {item.parentID ? ' · 子会话' : ''}
+                    <span className="session-card-meta" title={modelLabel(item.model)}>
+                      {!project
+                        ? `${projectInfo ? projectInfo.name || basename(projectInfo.canonical) : '未知项目'}${item.parentID ? ' · 子会话' : ''}`
+                        : item.parentID
+                          ? '子会话'
+                          : ''}
                     </span>
                   </span>
                   <span className="session-card-side">
+                    {attention?.[item.id] ? (
+                      <span className="attention-badge">待处理</span>
+                    ) : null}
+                    {completed?.[item.id] ? (
+                      <span
+                        className={`done-badge ${completed[item.id] === 'failed' ? 'failed' : ''}`}
+                      >
+                        {completed[item.id] === 'failed' ? '失败' : '已完成'}
+                      </span>
+                    ) : null}
                     <span className="session-time" title={formatDate(item.time?.updated)}>
                       {relativeTime(item.time?.updated, now)}
                     </span>

@@ -115,7 +115,7 @@ function Reasoning({ part, done }) {
   )
 }
 
-function AssistantMessage({ message, onUndo, onRegenerate, showActions }) {
+function AssistantMessage({ message, onUndo, onRegenerate, onCompact, showActions }) {
   const [copied, setCopied] = useState(false)
   const copyTimer = useRef(null)
   const parts = Array.isArray(message.content) ? message.content : []
@@ -178,6 +178,9 @@ function AssistantMessage({ message, onUndo, onRegenerate, showActions }) {
           ) : null}
           {showActions ? (
             <>
+              <button className="message-copy" onClick={onCompact}>
+                压缩上下文
+              </button>
               <button className="message-copy" onClick={onRegenerate}>
                 重新生成
               </button>
@@ -268,6 +271,7 @@ const MessageItem = memo(function MessageItem({ message, onCancelQueued, onOpenA
         message={message}
         onUndo={actions?.onUndo}
         onRegenerate={actions?.onRegenerate}
+        onCompact={actions?.onCompact}
         showActions={Boolean(actions)}
       />
     )
@@ -298,6 +302,7 @@ export default function MessageList({
   onLoadOlder,
   onUndo,
   onRegenerate,
+  onCompact,
   onOpenAttachment,
 }) {
   const [atBottom, setAtBottom] = useState(true)
@@ -412,7 +417,7 @@ export default function MessageList({
               onOpenAttachment={onOpenAttachment}
               actions={
                 !busy && message.id === lastAssistantId
-                  ? { onUndo, onRegenerate }
+                  ? { onUndo, onRegenerate, onCompact }
                   : null
               }
             />
@@ -439,12 +444,12 @@ export default function MessageList({
 export function SessionHeader({
   session,
   busy,
+  breadcrumb,
   onRename,
   onDelete,
   onOpenFolder,
   onRun,
   onOpenModel,
-  onCompact,
 }) {
   const info = session?.info
 
@@ -452,24 +457,8 @@ export function SessionHeader({
     <header className="session-head">
       <div className="session-head-inner">
         <div className="session-head-line">
-          {busy ? (
-            <span className="busy-pill">
-              <span className="running-dot" />
-              执行中
-            </span>
-          ) : null}
+          {breadcrumb}
           {info?.parentID ? <span className="soft-pill">子会话</span> : null}
-          <button className="model-button" onClick={onOpenModel} title="切换模型与 agent">
-            {info?.model ? modelLabel(info.model) : '默认模型'}
-          </button>
-          {info?.agent ? (
-            <button className="model-button" onClick={onOpenModel} title="切换模型与 agent">
-              agent {info.agent}
-            </button>
-          ) : null}
-          <button className="model-button" onClick={onCompact} title="压缩上下文">
-            压缩上下文
-          </button>
         </div>
         <div className="session-actions">
           <button className="ghost-button" onClick={onRun}>
@@ -520,10 +509,12 @@ function readFileDataUrl(file) {
   })
 }
 
-export function Composer({ sessionId, onSend, onStop, busy, sending, stopping }) {
+export function Composer({ sessionId, onSend, onStop, busy, sending, stopping, model, agent, onOpenModel }) {
   const storageKey = sessionId ? `ocm_draft_${sessionId}` : ''
   const [text, setText] = useState(() => (storageKey ? readDraft(storageKey) : ''))
   const [attachments, setAttachments] = useState([])
+  const [pastes, setPastes] = useState([])
+  const [openPaste, setOpenPaste] = useState(null)
   const [attachError, setAttachError] = useState('')
   const [dragging, setDragging] = useState(false)
   const textareaRef = useRef(null)
@@ -539,6 +530,8 @@ export function Composer({ sessionId, onSend, onStop, busy, sending, stopping })
     lastKey.current = storageKey
     setText(storageKey ? readDraft(storageKey) : '')
     setAttachments([])
+    setPastes([])
+    setOpenPaste(null)
     setAttachError('')
   }, [storageKey])
 
@@ -596,15 +589,22 @@ export function Composer({ sessionId, onSend, onStop, busy, sending, stopping })
 
   const submit = async () => {
     const value = text.trim()
-    if ((!value && attachments.length === 0) || sending) return
+    const combined = [...pastes.map((item) => item.text), value]
+      .filter(Boolean)
+      .join('\n\n')
+    if ((!combined && attachments.length === 0) || sending) return
     const sentFiles = attachments
+    const sentPastes = pastes
     setText('')
     setAttachments([])
+    setPastes([])
+    setOpenPaste(null)
     setAttachError('')
-    const ok = await onSend(value || '请看附件', sentFiles)
+    const ok = await onSend(combined || '请看附件', sentFiles)
     if (ok === false) {
       setText((prev) => prev || value)
       setAttachments(sentFiles)
+      setPastes(sentPastes)
     }
   }
 
@@ -649,6 +649,40 @@ export function Composer({ sessionId, onSend, onStop, busy, sending, stopping })
             ))}
           </div>
         ) : null}
+        {pastes.length > 0 ? (
+          <div className="paste-list">
+            {pastes.map((item) => (
+              <div className="paste-block" key={item.id}>
+                <div className="paste-head">
+                  <Icon name="layers" size={14} />
+                  <span className="paste-title">粘贴的文本</span>
+                  <span className="paste-size">{item.text.length} 字</span>
+                  <button
+                    className="paste-action"
+                    onClick={() =>
+                      setOpenPaste((prev) => (prev === item.id ? null : item.id))
+                    }
+                  >
+                    {openPaste === item.id ? '收起' : '查看'}
+                  </button>
+                  <button
+                    className="paste-action"
+                    onClick={() => setPastes((prev) => prev.filter((one) => one.id !== item.id))}
+                    aria-label="移除粘贴的文本"
+                  >
+                    删除
+                  </button>
+                </div>
+                {openPaste === item.id ? (
+                  <pre className="paste-preview">
+                    {item.text.slice(0, 20000)}
+                    {item.text.length > 20000 ? '\n…内容过长，仅显示前 20000 字' : ''}
+                  </pre>
+                ) : null}
+              </div>
+            ))}
+          </div>
+        ) : null}
         <textarea
           ref={textareaRef}
           id="session-composer"
@@ -659,9 +693,19 @@ export function Composer({ sessionId, onSend, onStop, busy, sending, stopping })
             const items = Array.from(event.clipboardData?.items || []).filter((item) =>
               item.type.startsWith('image/'),
             )
-            if (items.length === 0) return
-            event.preventDefault()
-            void addFiles(items.map((item) => item.getAsFile()))
+            if (items.length > 0) {
+              event.preventDefault()
+              void addFiles(items.map((item) => item.getAsFile()))
+              return
+            }
+            const raw = event.clipboardData?.getData('text/plain') || ''
+            if (raw.length > 1000) {
+              event.preventDefault()
+              setPastes((prev) => [
+                ...prev,
+                { id: `paste_${Date.now()}_${prev.length}`, text: raw },
+              ])
+            }
           }}
           onKeyDown={(event) => {
             if (event.key !== 'Enter' || event.shiftKey) return
@@ -670,7 +714,7 @@ export function Composer({ sessionId, onSend, onStop, busy, sending, stopping })
             void submit()
           }}
           rows={1}
-          placeholder={busy ? '继续输入，消息会插话到当前回合' : '继续这个会话，输入消息…'}
+          placeholder=""
           aria-label="输入消息"
         />
         {attachError ? <p className="attach-error">{attachError}</p> : null}
@@ -684,9 +728,17 @@ export function Composer({ sessionId, onSend, onStop, busy, sending, stopping })
             >
               <Icon name="attach" size={16} />
             </button>
-            <span className="composer-hint">
-              {busy ? '执行中，新消息会在下一步读取' : 'Enter 发送 · Shift + Enter 换行'}
-            </span>
+            <span className="composer-hint">Enter 发送 · Shift + Enter 换行</span>
+            {onOpenModel ? (
+              <button
+                className="model-button composer-model"
+                onClick={onOpenModel}
+                title={`切换模型与 agent${agent ? ` · 当前 agent ${agent}` : ''}`}
+              >
+                {model ? modelLabel(model) : '默认模型'}
+                {agent && agent !== 'build' ? ` · ${agent}` : ''}
+              </button>
+            ) : null}
           </span>
           <input
             ref={fileRef}
@@ -708,7 +760,7 @@ export function Composer({ sessionId, onSend, onStop, busy, sending, stopping })
             <button
               className="send-button"
               onClick={() => void submit()}
-              disabled={(!text.trim() && attachments.length === 0) || sending}
+              disabled={(!text.trim() && pastes.length === 0 && attachments.length === 0) || sending}
               aria-label="发送消息"
             >
               {sending ? <span className="spinner small" /> : <Icon name="arrowUp" size={17} />}

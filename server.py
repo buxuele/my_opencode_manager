@@ -331,6 +331,52 @@ async def events(
     )
 
 
+@app.post("/api/show-folder")
+def show_folder(payload: dict = Body(default={})):
+    raw = str(payload.get("path") or "").strip() or str(Path.home())
+    directory = Path(raw).expanduser()
+    if not directory.is_dir():
+        directory = Path.home()
+    escaped = str(directory).replace("\\", "\\\\").replace('"', '\\"')
+    script = (
+        'tell application "Finder"\n'
+        "activate\n"
+        f'open (POSIX file "{escaped}" as alias)\n'
+        "end tell"
+    )
+    result = subprocess.run(
+        ["osascript", "-e", script], capture_output=True, text=True, timeout=10
+    )
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "").strip()
+        raise HTTPException(status_code=500, detail=f"打开访达失败：{detail or '未知错误'}")
+    return {"path": str(directory)}
+
+
+@app.get("/api/finder-selection")
+def finder_selection():
+    script = (
+        'tell application "Finder"\n'
+        "set sel to selection\n"
+        "if (count of sel) is 0 then return \"\"\n"
+        "return POSIX path of (item 1 of sel as alias)\n"
+        "end tell"
+    )
+    result = subprocess.run(
+        ["osascript", "-e", script], capture_output=True, text=True, timeout=10
+    )
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "").strip()
+        raise HTTPException(status_code=500, detail=f"读取访达选区失败：{detail or '未知错误'}")
+    chosen = result.stdout.strip().rstrip("/") or ""
+    if not chosen:
+        raise HTTPException(status_code=404, detail="访达里还没有选中文件夹")
+    directory = Path(chosen)
+    if not directory.is_dir():
+        raise HTTPException(status_code=400, detail="请选中一个文件夹，而不是文件")
+    return {"path": str(directory)}
+
+
 @app.post("/api/run")
 async def run_project(payload: dict = Body(...)):
     raw_path = str(payload.get("path", "")).strip()

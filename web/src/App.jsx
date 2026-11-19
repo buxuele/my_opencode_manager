@@ -4,6 +4,7 @@ import Sidebar from './Sidebar'
 import Overview from './Overview'
 import SessionView from './SessionView'
 import ModelPicker from './ModelPicker'
+import NewSessionModal from './NewSessionModal'
 import Modal from './Modal'
 import Toast from './Toast'
 import { Icon, Logo } from './Icons'
@@ -863,8 +864,7 @@ export default function App() {
     void loadSession(sessionId)
   }
 
-  const createSession = async (chosenProject = null) => {
-    if (creatingRef.current) return
+  const defaultSessionPath = (chosenProject = null) => {
     const preferred =
       chosenProject || (selectedProject === 'all' ? null : projectById.get(selectedProject))
     const latest = sessions
@@ -875,27 +875,40 @@ export default function App() {
       latest ||
       sidebarProjects[0] ||
       projects.find((project) => project.exists !== false)
-    if (!target?.canonical) {
-      notify('没有可用的项目目录，无法新建会话')
-      return
+    return target?.canonical || ''
+  }
+
+  const openNewSession = (chosenProject = null) => {
+    setModal({ kind: 'new-session', path: defaultSessionPath(chosenProject) })
+  }
+
+  const createSessionAt = async (directory) => {
+    if (creatingRef.current) return false
+    const target = directory?.trim()
+    if (!target) {
+      notify('请选择会话目录')
+      return false
     }
     creatingRef.current = true
     try {
       const result = await api('/sessions', {
         method: 'POST',
-        body: JSON.stringify({ location: { directory: target.canonical } }),
+        body: JSON.stringify({ location: { directory: target } }),
       })
       const info = result?.data
       if (!info?.id) throw new Error('新建会话失败')
       await loadSessions()
-      setSelectedProject(info.projectID || target.id)
+      setSelectedProject(info.projectID || selectedProject)
       setView({ kind: 'session', id: info.id })
       setSession(null)
       setSidebarOpen(false)
+      setModal(null)
       notify('已新建会话', 'success')
       void loadSession(info.id)
+      return true
     } catch (error) {
       notify(error.message)
+      return false
     } finally {
       creatingRef.current = false
     }
@@ -911,11 +924,11 @@ export default function App() {
       if (!(event.metaKey || event.ctrlKey) || event.shiftKey) return
       if (event.key.toLowerCase() !== 'n') return
       event.preventDefault()
-      void createSession()
+      openNewSession()
     }
     window.addEventListener('keydown', handler)
     return () => window.removeEventListener('keydown', handler)
-  }, [createSession])
+  }, [selectedProject, sessions])
 
   const refreshCurrent = async () => {
     try {
@@ -1372,24 +1385,6 @@ export default function App() {
     }
   }
 
-  const openSessionFolder = async (item) => {
-    const directory =
-      item?.location?.directory || projectById.get(item?.projectID || '')?.canonical
-    if (!directory) {
-      notify('找不到项目目录')
-      return
-    }
-    try {
-      await api('/reveal', {
-        method: 'POST',
-        body: JSON.stringify({ path: directory, target: 'finder' }),
-      })
-      notify('已打开项目文件夹', 'success')
-    } catch (error) {
-      notify(error.message)
-    }
-  }
-
   const openFinder = async (target, project = null) => {
     const directory = (project || currentProject)?.canonical
     if (!directory) return
@@ -1418,6 +1413,35 @@ export default function App() {
 
   const currentSessionItem = view.kind === 'session' ? session?.info : null
   const running = Boolean(currentSessionItem && active[currentSessionItem.id])
+
+  const breadcrumbNode = (
+    <div className="breadcrumb">
+      {view.kind === 'session' ? null : (
+        <button className="crumb" onClick={() => openProject('all')}>
+          全部项目
+        </button>
+      )}
+      {breadcrumbProject ? (
+        <>
+          <Icon name="chevronRight" size={14} className="crumb-sep" />
+          <button
+            className="crumb project-crumb"
+            onClick={() => openProject(breadcrumbProject.id)}
+          >
+            {breadcrumbProject.name || basename(breadcrumbProject.canonical)}
+          </button>
+        </>
+      ) : null}
+      {view.kind === 'session' && currentSessionItem ? (
+        <>
+          <Icon name="chevronRight" size={14} className="crumb-sep" />
+          <span className="crumb current" title={currentSessionItem.title || '未命名会话'}>
+            {currentSessionItem.title || '未命名会话'}
+          </span>
+        </>
+      ) : null}
+    </div>
+  )
 
   if (bootLoading) {
     return (
@@ -1462,16 +1486,17 @@ export default function App() {
         open={sidebarOpen}
         onClose={() => setSidebarOpen(false)}
         now={now}
-        onCreateSession={() => void createSession()}
+        onCreateSession={() => openNewSession()}
         completed={completed}
         attention={attention}
-        onOpenFolder={openSessionFolder}
         onGoHome={() => openProject('all')}
-        onNewSessionInProject={(project) => void createSession(project)}
+        onNewSessionInProject={(project) => openNewSession(project)}
         onOpenProjectFolder={(project, target) => void openFinder(target, project)}
         onCopyProjectCommand={(project) => void copyCommand(project)}
         pinned={pinned}
         onTogglePin={togglePinProject}
+        onRefresh={() => void refreshCurrent()}
+        onOpenSettings={() => setModal({ kind: 'settings' })}
         onRenameProject={(project) =>
           setModal({
             kind: 'project-rename',
@@ -1483,34 +1508,13 @@ export default function App() {
 
       <main className="main-panel">
         <header className="topbar">
-          <div className="topbar-left">
-            <button
-              className="icon-button mobile-only"
-              onClick={() => setSidebarOpen(true)}
-              aria-label="打开菜单"
-            >
-              <Icon name="menu" />
-            </button>
-            <div className="breadcrumb">
-              <button className="crumb" onClick={() => openProject('all')}>
-                全部项目
-              </button>
-              {breadcrumbProject ? (
-                <>
-                  <Icon name="chevronRight" size={14} className="crumb-sep" />
-                  <button className="crumb project-crumb" onClick={() => openProject(breadcrumbProject.id)}>
-                    {breadcrumbProject.name || basename(breadcrumbProject.canonical)}
-                  </button>
-                </>
-              ) : null}
-              {view.kind === 'session' && currentSessionItem ? (
-                <>
-                  <Icon name="chevronRight" size={14} className="crumb-sep" />
-                  <span className="crumb current">{currentSessionItem.title || '未命名会话'}</span>
-                </>
-              ) : null}
-            </div>
-          </div>
+          <button
+            className="icon-button"
+            onClick={() => setSidebarOpen(true)}
+            aria-label="打开菜单"
+          >
+            <Icon name="menu" />
+          </button>
           <div className="topbar-right">
             <span className={`live-pill ${liveConnected ? 'on' : 'off'}`}>
               <span className="live-dot" />
@@ -1540,7 +1544,7 @@ export default function App() {
               page={page}
               onPageChange={setPage}
               onOpenSession={openSession}
-              onCreateSession={() => void createSession()}
+              onCreateSession={() => openNewSession()}
               onOpenFinder={() => void openFinder('finder')}
               onOpenTerminal={() => void openFinder('terminal')}
               onCopyCommand={() => void copyCommand()}
@@ -1554,6 +1558,9 @@ export default function App() {
               }
               query={query}
               now={now}
+              breadcrumb={breadcrumbNode}
+              attention={attention}
+              completed={completed}
             />
           ) : (
             <SessionView
@@ -1562,6 +1569,7 @@ export default function App() {
               loading={sessionLoading}
               busy={running}
               stopping={stopping}
+              breadcrumb={breadcrumbNode}
               olderCursor={session?.olderCursor}
               loadingOlder={loadingOlder}
               onLoadOlder={loadOlder}
@@ -1602,6 +1610,18 @@ export default function App() {
       </main>
 
       {sidebarOpen ? <div className="sidebar-mask" onClick={() => setSidebarOpen(false)} /> : null}
+
+      {modal?.kind === 'new-session' ? (
+        <NewSessionModal
+          initialPath={modal.path}
+          recents={sidebarProjects.slice(0, 6).map((project) => ({
+            name: project.name || basename(project.canonical),
+            path: project.canonical,
+          }))}
+          onClose={() => setModal(null)}
+          onCreate={(path) => createSessionAt(path)}
+        />
+      ) : null}
 
       {modal?.kind === 'rename' ? (
         <RenameModal
