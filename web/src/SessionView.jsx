@@ -101,6 +101,7 @@ export default function SessionView({
         model={session.info?.model}
         agent={session.info?.agent}
         onOpenModel={onOpenModel}
+        directory={session.info?.location?.directory || ''}
       />
     </div>
   )

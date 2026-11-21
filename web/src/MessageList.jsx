@@ -3,6 +3,7 @@ import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { Icon } from './Icons'
 import { duration, formatClock, formatElapsed, modelLabel } from './format'
+import { api } from './api'
 
 function Markdown({ children }) {
   return (
@@ -115,7 +116,7 @@ function Reasoning({ part, done }) {
   )
 }
 
-function AssistantMessage({ message, onUndo, onRegenerate, onCompact, showActions }) {
+function AssistantMessage({ message, onUndo, onRegenerate, onCompact, showActions, isLast }) {
   const [copied, setCopied] = useState(false)
   const copyTimer = useRef(null)
   const parts = Array.isArray(message.content) ? message.content : []
@@ -165,9 +166,10 @@ function AssistantMessage({ message, onUndo, onRegenerate, onCompact, showAction
             <p className="message-error">执行失败：{errorText || '未知错误'}</p>
           )
         ) : null}
+        {plainText || isLast ? (
         <div className="message-foot">
           <span>{formatClock(message.time?.created)}</span>
-          {message.agent ? <span>agent {message.agent}</span> : null}
+          {message.agent && message.agent !== 'build' ? <span>agent {message.agent}</span> : null}
           {message.time?.completed && message.time?.created
             ? <span>耗时 {duration(message.time.created, message.time.completed)}</span>
             : null}
@@ -190,6 +192,7 @@ function AssistantMessage({ message, onUndo, onRegenerate, onCompact, showAction
             </>
           ) : null}
         </div>
+        ) : null}
       </div>
     </div>
   )
@@ -254,7 +257,7 @@ function ShellMessage({ message }) {
   )
 }
 
-const MessageItem = memo(function MessageItem({ message, onCancelQueued, onOpenAttachment, actions }) {
+const MessageItem = memo(function MessageItem({ message, onCancelQueued, onOpenAttachment, actions, isLast }) {
   if (!message) return null
   if (message.type === 'user') {
     return (
@@ -273,6 +276,7 @@ const MessageItem = memo(function MessageItem({ message, onCancelQueued, onOpenA
         onRegenerate={actions?.onRegenerate}
         onCompact={actions?.onCompact}
         showActions={Boolean(actions)}
+        isLast={isLast}
       />
     )
   }
@@ -415,6 +419,7 @@ export default function MessageList({
               message={message}
               onCancelQueued={onCancelQueued}
               onOpenAttachment={onOpenAttachment}
+              isLast={message.id === visible[visible.length - 1]?.id}
               actions={
                 !busy && message.id === lastAssistantId
                   ? { onUndo, onRegenerate, onCompact }
@@ -509,9 +514,12 @@ function readFileDataUrl(file) {
   })
 }
 
-export function Composer({ sessionId, onSend, onStop, busy, sending, stopping, model, agent, onOpenModel }) {
+export function Composer({ sessionId, onSend, onStop, busy, sending, stopping, model, agent, onOpenModel, directory }) {
   const storageKey = sessionId ? `ocm_draft_${sessionId}` : ''
   const [text, setText] = useState(() => (storageKey ? readDraft(storageKey) : ''))
+  const [commands, setCommands] = useState([])
+  const [commandIndex, setCommandIndex] = useState(0)
+  const [commandHidden, setCommandHidden] = useState(false)
   const [attachments, setAttachments] = useState([])
   const [pastes, setPastes] = useState([])
   const [openPaste, setOpenPaste] = useState(null)
@@ -546,6 +554,19 @@ export function Composer({ sessionId, onSend, onStop, busy, sending, stopping, m
     node.style.height = 'auto'
     node.style.height = `${Math.min(node.scrollHeight, 180)}px`
   }, [text])
+
+  useEffect(() => {
+    if (!directory) return
+    let cancelled = false
+    api(`/commands?directory=${encodeURIComponent(directory)}`)
+      .then((result) => {
+        if (!cancelled) setCommands(result?.data || [])
+      })
+      .catch(() => {})
+    return () => {
+      cancelled = true
+    }
+  }, [directory])
 
   useEffect(() => {
     if (!storageKey) return
@@ -585,6 +606,25 @@ export function Composer({ sessionId, onSend, onStop, busy, sending, stopping, m
       }
     }
     setAttachments(next)
+  }
+
+  const slashMatch = /^\/([^\s/]*)$/.exec(text)
+  const slashWord = slashMatch && !commandHidden ? slashMatch[1].toLowerCase() : null
+  const slashItems =
+    slashWord === null
+      ? []
+      : commands
+          .filter((item) => item.name.toLowerCase().startsWith(slashWord))
+          .slice(0, 8)
+
+  useEffect(() => {
+    setCommandIndex(0)
+  }, [slashWord])
+
+  const completeCommand = (name) => {
+    setText(`/${name} `)
+    setCommandHidden(true)
+    textareaRef.current?.focus()
   }
 
   const submit = async () => {
@@ -688,7 +728,10 @@ export function Composer({ sessionId, onSend, onStop, busy, sending, stopping, m
           id="session-composer"
           name="message"
           value={text}
-          onChange={(event) => setText(event.target.value)}
+          onChange={(event) => {
+            setText(event.target.value)
+            setCommandHidden(false)
+          }}
           onPaste={(event) => {
             const items = Array.from(event.clipboardData?.items || []).filter((item) =>
               item.type.startsWith('image/'),
@@ -708,6 +751,26 @@ export function Composer({ sessionId, onSend, onStop, busy, sending, stopping, m
             }
           }}
           onKeyDown={(event) => {
+            if (slashItems.length > 0) {
+              if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+                event.preventDefault()
+                setCommandIndex((prev) => {
+                  const next = event.key === 'ArrowDown' ? prev + 1 : prev - 1
+                  return Math.max(0, Math.min(slashItems.length - 1, next))
+                })
+                return
+              }
+              if (event.key === 'Tab' || (event.key === 'Enter' && !event.shiftKey)) {
+                event.preventDefault()
+                completeCommand(slashItems[commandIndex].name)
+                return
+              }
+              if (event.key === 'Escape') {
+                event.preventDefault()
+                setCommandHidden(true)
+                return
+              }
+            }
             if (event.key !== 'Enter' || event.shiftKey) return
             if (event.nativeEvent?.isComposing || event.keyCode === 229) return
             event.preventDefault()
@@ -717,6 +780,24 @@ export function Composer({ sessionId, onSend, onStop, busy, sending, stopping, m
           placeholder=""
           aria-label="输入消息"
         />
+        {slashItems.length > 0 ? (
+          <div className="command-menu" role="listbox" aria-label="可用命令">
+            {slashItems.map((item, index) => (
+              <button
+                key={item.name}
+                className={`command-row ${index === commandIndex ? 'active' : ''}`}
+                onMouseMove={() => setCommandIndex(index)}
+                onMouseDown={(event) => {
+                  event.preventDefault()
+                  completeCommand(item.name)
+                }}
+              >
+                <span className="command-name">/{item.name}</span>
+                <span className="command-desc">{item.description || ''}</span>
+              </button>
+            ))}
+          </div>
+        ) : null}
         {attachError ? <p className="attach-error">{attachError}</p> : null}
         <div className="composer-bar">
           <span className="composer-tools">

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import Modal from './Modal'
 import { api } from './api'
 import { Icon } from './Icons'
@@ -17,6 +17,8 @@ export default function ModelPicker({ session, onClose, onPickModel, onPickAgent
   const [models, setModels] = useState([])
   const [agents, setAgents] = useState([])
   const [query, setQuery] = useState('')
+  const [cursor, setCursor] = useState(0)
+  const listRef = useRef(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const directory = session?.info?.location?.directory || ''
@@ -74,6 +76,43 @@ export default function ModelPicker({ session, onClose, onPickModel, onPickAgent
     [agents, keyword],
   )
 
+  const items = tab === 'model' ? filteredModels : filteredAgents
+
+  useEffect(() => {
+    setCursor(0)
+  }, [tab, keyword])
+
+  useEffect(() => {
+    const node = listRef.current?.children?.[cursor]
+    if (node instanceof HTMLElement) node.scrollIntoView({ block: 'nearest' })
+  }, [cursor])
+
+  const pick = (index) => {
+    if (tab === 'model') {
+      const item = filteredModels[index]
+      if (item) onPickModel({ id: item.modelID, providerID: item.providerID })
+      return
+    }
+    const item = filteredAgents[index]
+    if (item) onPickAgent(item.id)
+  }
+
+  const onKeyDown = (event) => {
+    if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+      event.preventDefault()
+      if (items.length === 0) return
+      setCursor((prev) => {
+        const next = event.key === 'ArrowDown' ? prev + 1 : prev - 1
+        return Math.max(0, Math.min(items.length - 1, next))
+      })
+      return
+    }
+    if (event.key === 'Enter' && items.length > 0) {
+      event.preventDefault()
+      pick(cursor)
+    }
+  }
+
   return (
     <Modal title="模型与 agent" onClose={onClose} wide>
       <div className="picker-tabs">
@@ -94,6 +133,7 @@ export default function ModelPicker({ session, onClose, onPickModel, onPickAgent
         className="text-input"
         value={query}
         onChange={(event) => setQuery(event.target.value)}
+        onKeyDown={onKeyDown}
         placeholder={tab === 'model' ? '搜索模型或供应商' : '搜索 agent'}
         aria-label="搜索"
       />
@@ -102,14 +142,15 @@ export default function ModelPicker({ session, onClose, onPickModel, onPickAgent
       ) : error ? (
         <p className="picker-note error">{error}</p>
       ) : tab === 'model' ? (
-        <div className="picker-list">
-          {filteredModels.map((item) => {
+        <div className="picker-list" ref={listRef}>
+          {filteredModels.map((item, index) => {
             const active =
               currentModel?.id === item.modelID && currentModel?.providerID === item.providerID
             return (
               <button
                 key={`${item.providerID}/${item.modelID}/${item.id}`}
-                className={`picker-row ${active ? 'active' : ''}`}
+                className={`picker-row ${active ? 'active' : ''} ${index === cursor ? 'cursor' : ''}`}
+                onMouseMove={() => setCursor(index)}
                 onClick={() =>
                   onPickModel({ id: item.modelID, providerID: item.providerID })
                 }
@@ -129,13 +170,14 @@ export default function ModelPicker({ session, onClose, onPickModel, onPickAgent
           {filteredModels.length === 0 ? <p className="picker-note">没有匹配的模型</p> : null}
         </div>
       ) : (
-        <div className="picker-list">
-          {filteredAgents.map((item) => {
+        <div className="picker-list" ref={listRef}>
+          {filteredAgents.map((item, index) => {
             const active = currentAgent === item.id
             return (
               <button
                 key={item.id}
-                className={`picker-row ${active ? 'active' : ''}`}
+                className={`picker-row ${active ? 'active' : ''} ${index === cursor ? 'cursor' : ''}`}
+                onMouseMove={() => setCursor(index)}
                 onClick={() => onPickAgent(item.id)}
               >
                 <span className="picker-main">

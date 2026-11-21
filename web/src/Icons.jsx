@@ -20,6 +20,7 @@ const paths = {
   alert: 'M12 4 2.5 20h19L12 4Zm0 5v6m0 3v.01',
   menu: 'M4 7h16M4 12h16M4 17h16',
   arrowUp: 'M12 19V5m-7 7 7-7 7 7',
+  barUp: 'M5 4h14M12 20V8m-5 5 5-5 5 5',
   dot: 'M12 12h.01',
   clock: 'M12 7v5l3 2M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18Z',
   layers: 'm12 3 9 5-9 5-9-5 9-5Zm-9 9 9 5 9-5M3 16l9 5 9-5',

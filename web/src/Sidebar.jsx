@@ -64,6 +64,7 @@ export default function Sidebar({
   }, [])
 
   const keyword = query.trim().toLowerCase()
+  const hasPinned = pinned.length > 0
 
   const sessionsByProject = useMemo(() => {
     const map = new Map()
@@ -238,6 +239,11 @@ export default function Sidebar({
                   onClick={() => toggleProject(project.id)}
                   title={shortPath(project.canonical)}
                 >
+                  {hasPinned ? (
+                    <span className="pin-mark" title={pinned.includes(project.id) ? '已置顶' : ''}>
+                      {pinned.includes(project.id) ? <Icon name="barUp" size={13} /> : null}
+                    </span>
+                  ) : null}
                   {activeProjects.has(project.id) ? (
                     <span className="running-dot project-running-dot" />
                   ) : null}

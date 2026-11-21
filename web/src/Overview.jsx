@@ -42,6 +42,7 @@ export default function Overview({
   breadcrumb,
   attention,
   completed,
+  onClearQuery,
 }) {
   const [sort, setSort] = useState('updated')
 
@@ -118,14 +119,6 @@ export default function Overview({
                   <Icon name="terminal" size={16} />
                   在终端打开
                 </button>
-                <button className="ghost-button" onClick={onCopyCommand}>
-                  <Icon name="copy" size={16} />
-                  复制启动命令
-                </button>
-                <button className="ghost-button" onClick={onRenameProject}>
-                  <Icon name="pencil" size={16} />
-                  重命名项目
-                </button>
               </div>
             </div>
           </section>
@@ -138,7 +131,11 @@ export default function Overview({
           <div className="empty-block">
             <Icon name="chat" size={26} />
             <p>{query ? '没有匹配的会话' : project ? '这个项目还没有会话' : '还没有任何会话'}</p>
-            <span>在 opencode 中新建会话后，这里会自动出现。</span>
+            {query ? (
+              <button className="ghost-button" onClick={onClearQuery}>清空搜索</button>
+            ) : (
+              <span>在 opencode 中新建会话后，这里会自动出现。</span>
+            )}
           </div>
         ) : (
           <div className="session-table">

@@ -372,11 +372,20 @@ export default function App() {
   }
 
   const loadSessions = useCallback(async () => {
-    const [live, activeMap] = await Promise.all([
-      api('/sessions?limit=1000'),
-      api('/sessions/active'),
-    ])
-    setSessions(normalizeSessions(live))
+    const activeMap = await api('/sessions/active')
+    const collected = []
+    let cursor = null
+    for (let page = 0; page < 20; page += 1) {
+      const query = new URLSearchParams({ limit: '500' })
+      if (cursor) query.set('cursor', cursor)
+      const result = await api(`/sessions?${query.toString()}`)
+      const batch = Array.isArray(result) ? result : result?.data || []
+      collected.push(...batch)
+      const next = Array.isArray(result) ? null : result?.cursor?.next || null
+      if (!next || batch.length === 0) break
+      cursor = next
+    }
+    setSessions(normalizeSessions(collected))
     setActive((activeMap && activeMap.data) || {})
   }, [])
 
@@ -930,6 +939,15 @@ export default function App() {
     return () => window.removeEventListener('keydown', handler)
   }, [selectedProject, sessions])
 
+  useEffect(() => {
+    if (!sidebarOpen) return
+    const previous = document.body.style.overflow
+    document.body.style.overflow = 'hidden'
+    return () => {
+      document.body.style.overflow = previous
+    }
+  }, [sidebarOpen])
+
   const refreshCurrent = async () => {
     try {
       await loadSessions()
@@ -1015,7 +1033,9 @@ export default function App() {
             text: text.trim(),
           }),
         })
+        notify(`已执行 /${command[1]}`, 'success')
         void loadSessions().catch(() => {})
+        void syncSession(sessionId, { force: true, limit: 6 }).catch(() => {})
         return true
       } catch (error) {
         notify(error.message)
@@ -1561,6 +1581,7 @@ export default function App() {
               breadcrumb={breadcrumbNode}
               attention={attention}
               completed={completed}
+              onClearQuery={() => setQuery('')}
             />
           ) : (
             <SessionView
