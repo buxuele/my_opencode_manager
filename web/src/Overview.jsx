@@ -4,6 +4,7 @@ import {
   basename,
   formatDate,
   modelLabel,
+  outcomeBadge,
   relativeTime,
   shortPath,
 } from './format'
@@ -43,6 +44,7 @@ export default function Overview({
   attention,
   completed,
   onClearQuery,
+  folderLabel,
 }) {
   const [sort, setSort] = useState('updated')
 
@@ -113,7 +115,7 @@ export default function Overview({
               <div className="hero-actions">
                 <button className="ghost-button" onClick={onOpenFinder}>
                   <Icon name="folder" size={16} />
-                  打开目录
+                  在{folderLabel || '文件管理器'}中打开
                 </button>
                 <button className="ghost-button" onClick={onOpenTerminal}>
                   <Icon name="terminal" size={16} />
@@ -142,6 +144,7 @@ export default function Overview({
             {visible.map((item) => {
               const projectInfo = projects.find((entry) => entry.id === item.projectID)
               const isRunning = Boolean(active[item.id])
+              const badge = completed?.[item.id] ? outcomeBadge(completed[item.id]) : null
               return (
                 <button
                   key={item.id}
@@ -151,7 +154,9 @@ export default function Overview({
                   <span className="session-card-main">
                     <span className="session-card-title">
                       {isRunning ? <span className="running-dot" /> : null}
-                      {item.title || '未命名会话'}
+                      <span className="session-card-title-text">
+                        {item.title || '未命名会话'}
+                      </span>
                     </span>
                     <span className="session-card-meta" title={modelLabel(item.model)}>
                       {!project
@@ -165,12 +170,8 @@ export default function Overview({
                     {attention?.[item.id] ? (
                       <span className="attention-badge">待处理</span>
                     ) : null}
-                    {completed?.[item.id] ? (
-                      <span
-                        className={`done-badge ${completed[item.id] === 'failed' ? 'failed' : ''}`}
-                      >
-                        {completed[item.id] === 'failed' ? '失败' : '已完成'}
-                      </span>
+                    {badge ? (
+                      <span className={`done-badge ${badge.className}`}>{badge.label}</span>
                     ) : null}
                     <span className="session-time" title={formatDate(item.time?.updated)}>
                       {relativeTime(item.time?.updated, now)}

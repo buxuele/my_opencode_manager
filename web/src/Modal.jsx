@@ -10,7 +10,7 @@ export default function Modal({ title, children, onClose, wide = false }) {
   useEffect(() => {
     lastFocused.current = document.activeElement
     const card = cardRef.current
-    const first = card?.querySelector(FOCUSABLE)
+    const first = card?.querySelector('[data-autofocus]') || card?.querySelector(FOCUSABLE)
     if (first instanceof HTMLElement) first.focus()
     return () => {
       const previous = lastFocused.current

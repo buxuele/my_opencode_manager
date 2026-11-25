@@ -4,13 +4,16 @@ import os
 import shlex
 import subprocess
 from contextvars import ContextVar
-from urllib.parse import quote
 from pathlib import Path
+from urllib.parse import quote, urlsplit, urlunsplit
 
 import httpx
 from fastapi import Body, FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
+
+from platform_ops import PlatformError, current_ops
+from preferences import PreferencesError, read_preferences, write_preferences
 
 ROOT = Path(__file__).resolve().parent
 DIST = ROOT / "dist"
@@ -18,6 +21,16 @@ SERVICE_FILE = Path.home() / ".local" / "state" / "opencode" / "service.json"
 MACHINES_FILE = ROOT / ".machines.json"
 API_TIMEOUT = httpx.Timeout(60.0, connect=5.0)
 CURRENT_MACHINE = ContextVar("current_machine", default="local")
+OPS = current_ops()
+
+
+def local_service_url(url):
+    parts = urlsplit(str(url))
+    if parts.hostname in {"0.0.0.0", "::"}:
+        host = "127.0.0.1"
+        netloc = f"{host}:{parts.port}" if parts.port else host
+        return urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment))
+    return str(url)
 
 app = FastAPI(title="opencode")
 
@@ -71,6 +84,36 @@ def machine_config(machine=None):
         if item["id"] == mid:
             return {"id": mid, "url": item["url"], "password": item["password"]}
     raise HTTPException(status_code=404, detail=f"没有配置这台机器：{mid}")
+@app.post("/api/pick-folder")
+def pick_folder(payload: dict = Body(default={})):
+    require_local()
+    raw = str(payload.get("path") or "").strip()
+    initial = Path(raw).expanduser() if raw else None
+    try:
+        return OPS.pick_folder(initial)
+    except PlatformError as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.get("/api/platform")
+def platform_info():
+    return OPS.info()
+
+
+@app.get("/api/preferences")
+def get_preferences():
+    try:
+        return read_preferences()
+    except PreferencesError as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.put("/api/preferences")
+def put_preferences(payload: dict = Body(...)):
+    try:
+        return write_preferences(payload)
+    except PreferencesError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
 
 
 def read_service():
@@ -150,8 +193,9 @@ async def curl_call(cfg, method, path, params=None, body=None, timeout=60):
 
 def upstream(timeout=None, machine=None):
     service = machine_config(machine)
+    base = local_service_url(service["url"]) if service["id"] == "local" else service["url"]
     return httpx.AsyncClient(
-        base_url=service["url"],
+        base_url=base,
         auth=httpx.BasicAuth("opencode", service["password"]),
         timeout=timeout or API_TIMEOUT,
         trust_env=False,
@@ -280,6 +324,33 @@ async def session_detail(session_id: str):
     return await call("GET", f"/api/session/{session_id}")
 
 
+def trim_message_payload(result):
+    for message in result.get("data") or []:
+        files = message.get("files")
+        if isinstance(files, list):
+            for item in files:
+                if isinstance(item, dict):
+                    item.pop("data", None)
+        for part in message.get("content") or []:
+            if not isinstance(part, dict) or part.get("type") != "tool":
+                continue
+            state = part.get("state")
+            if not isinstance(state, dict):
+                continue
+            blocks = state.get("content")
+            if not isinstance(blocks, list):
+                continue
+            for block in blocks:
+                if not isinstance(block, dict):
+                    continue
+                for key in ("uri", "url", "data"):
+                    value = block.get(key)
+                    if isinstance(value, str) and value.startswith("data:"):
+                        block.pop(key, None)
+                        block["omitted"] = True
+    return result
+
+
 @app.get("/api/sessions/{session_id}/messages")
 async def session_messages(
     session_id: str,
@@ -294,13 +365,7 @@ async def session_messages(
         params["order"] = order
     result = await call("GET", f"/api/session/{session_id}/message", params=params)
     if isinstance(result, dict):
-        for message in result.get("data") or []:
-            files = message.get("files")
-            if not isinstance(files, list):
-                continue
-            for item in files:
-                if isinstance(item, dict):
-                    item.pop("data", None)
+        return trim_message_payload(result)
     return result
 
 
@@ -518,37 +583,6 @@ def require_local():
         raise HTTPException(status_code=400, detail="远端机器不支持本地目录与终端操作")
 
 
-@app.post("/api/pick-folder")
-def pick_folder(payload: dict = Body(default={})):
-    require_local()
-    prompt = str(payload.get("prompt") or "选择项目目录").replace('"', '\\"')
-    script = (
-        'tell application "Finder" to activate\n'
-        "try\n"
-        f'  set chosen to choose folder with prompt "{prompt}"\n'
-        "  return POSIX path of chosen\n"
-        "on error number -128\n"
-        '  return ""\n'
-        "end try"
-    )
-    try:
-        result = subprocess.run(
-            ["osascript", "-e", script], capture_output=True, text=True, timeout=600
-        )
-    except subprocess.TimeoutExpired:
-        raise HTTPException(status_code=408, detail="选择目录超时")
-    if result.returncode != 0:
-        detail = (result.stderr or "").strip()
-        raise HTTPException(status_code=500, detail=f"系统目录选择失败：{detail or '未知错误'}")
-    chosen = result.stdout.strip().rstrip("/") or ""
-    if not chosen:
-        raise HTTPException(status_code=400, detail="已取消选择")
-    directory = Path(chosen)
-    if not directory.is_dir():
-        raise HTTPException(status_code=400, detail="选择的不是文件夹")
-    return {"path": str(directory)}
-
-
 @app.post("/api/run")
 async def run_project(payload: dict = Body(...)):
     require_local()
@@ -558,31 +592,13 @@ async def run_project(payload: dict = Body(...)):
     directory = Path(raw_path).expanduser()
     if not directory.is_dir():
         raise HTTPException(status_code=404, detail=f"目录不存在：{directory}")
-    script = directory / "just_run.sh"
+    script = directory / OPS.script_name
     if not script.is_file():
-        raise HTTPException(status_code=404, detail="项目目录没有 just_run.sh")
-    command = f"cd {shlex.quote(str(directory))} && ./just_run.sh"
-    if not os.access(script, os.X_OK):
-        command = f"cd {shlex.quote(str(directory))} && bash just_run.sh"
-    title = f"{directory.name} · just_run.sh"
-    escaped = command.replace("\\", "\\\\").replace('"', '\\"')
-    escaped_title = title.replace("\\", "\\\\").replace('"', '\\"')
-    applescript = (
-        'tell application "Terminal"\n'
-        "activate\n"
-        f'do script "{escaped}"\n'
-        f'set custom title of selected tab of front window to "{escaped_title}"\n'
-        "set title displays custom title of selected tab of front window to true\n"
-        "set frontmost of front window to true\n"
-        "end tell"
-    )
-    result = subprocess.run(
-        ["osascript", "-e", applescript], capture_output=True, text=True, timeout=10
-    )
-    if result.returncode != 0:
-        detail = (result.stderr or result.stdout or "").strip()
-        raise HTTPException(status_code=500, detail=f"打开终端失败：{detail or '未知错误'}")
-    return {"ok": True, "directory": str(directory), "title": title}
+        raise HTTPException(status_code=404, detail=f"项目目录没有 {OPS.script_name}")
+    try:
+        return OPS.launch_project(directory)
+    except PlatformError as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
 
 
 @app.post("/api/reveal")
@@ -596,29 +612,12 @@ async def reveal(payload: dict = Body(...)):
     directory = Path(raw_path).expanduser()
     if not directory.is_dir():
         raise HTTPException(status_code=404, detail=f"目录不存在：{directory}")
-    if target == "terminal":
-        subprocess.Popen(["open", "-a", "Terminal", str(directory)])
-        return {"ok": True, "directory": str(directory)}
-    escaped = str(directory).replace("\\", "\\\\").replace('"', '\\"')
-    if select:
-        body = (
-            "activate\n"
-            f'set targetItem to (POSIX file "{escaped}" as alias)\n'
-            "reveal targetItem\n"
-            "select targetItem\n"
-            "activate\n"
-        )
-    else:
-        body = "activate\n" f'open (POSIX file "{escaped}" as alias)\n'
-    applescript = 'tell application "Finder"\n' f"{body}" "end tell"
-    result = subprocess.run(
-        ["osascript", "-e", applescript], capture_output=True, text=True, timeout=10
-    )
-    if result.returncode != 0:
-        detail = (result.stderr or result.stdout or "").strip()
-        raise HTTPException(status_code=500, detail=f"打开访达失败：{detail or '未知错误'}")
-    opened = str(directory.parent) if select else str(directory)
-    return {"ok": True, "directory": opened, "selected": str(directory) if select else None}
+    try:
+        if target == "project":
+            return OPS.reveal_project(directory)
+        return OPS.reveal(directory, target=target, select=select)
+    except PlatformError as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
 
 
 if (DIST / "assets").is_dir():

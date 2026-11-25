@@ -4,6 +4,14 @@ export function basename(path) {
   return parts[parts.length - 1] || path
 }
 
+export function parentPath(path) {
+  if (!path) return ''
+  const trimmed = path.replace(/[\\/]+$/, '')
+  const index = Math.max(trimmed.lastIndexOf('/'), trimmed.lastIndexOf('\\'))
+  if (index <= 0) return trimmed
+  return trimmed.slice(0, index)
+}
+
 export function formatDate(ms) {
   if (!ms) return ''
   const d = new Date(ms)
@@ -54,6 +62,12 @@ export function modelLabel(model) {
   return `${provider}${id}${variant}`
 }
 
+export function outcomeBadge(value) {
+  if (value === 'failed') return { label: '失败', className: 'failed' }
+  if (value === 'interrupted') return { label: '已中断', className: 'interrupted' }
+  return { label: '已完成', className: '' }
+}
+
 export function formatElapsed(seconds) {
   const total = Math.max(0, Math.floor(seconds))
   const hours = Math.floor(total / 3600)
@@ -77,12 +91,9 @@ export function duration(start, end) {
 
 export function shortPath(path) {
   if (!path) return ''
-  const home = '/Users/'
-  const idx = path.indexOf(home)
-  if (idx === 0) {
-    const rest = path.slice(home.length)
-    const slash = rest.indexOf('/')
-    if (slash > 0) return `~${rest.slice(slash)}`
-  }
+  const mac = path.match(/^\/Users\/[^/]+(\/.*)?$/)
+  if (mac) return `~${mac[1] || ''}`
+  const win = path.match(/^[A-Za-z]:\\Users\\[^\\]+(\\[^\\]+.*)?$/)
+  if (win) return `~${win[1] || ''}`
   return path
 }

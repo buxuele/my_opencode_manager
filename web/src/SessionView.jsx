@@ -76,6 +76,7 @@ export default function SessionView({
         messages={session.messages}
         sessionId={sessionId}
         busy={busy}
+        sessionOutcome={session.info?.outcome}
         startedAt={session.info?.time?.busy}
         onCancelQueued={onCancelQueued}
         olderCursor={olderCursor}

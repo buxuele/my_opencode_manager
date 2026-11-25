@@ -305,7 +305,8 @@ a:focus-visible {
   flex: 1;
   min-width: 0;
   font-size: 15px;
-  font-weight: 600;
+  font-weight: 650;
+  letter-spacing: -0.01em;
   color: #2f2f2f;
   white-space: nowrap;
   overflow: hidden;
@@ -382,12 +383,13 @@ a:focus-visible {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  line-height: 1.4;
+  line-height: 20px;
 }
 
 .project-session-time {
   flex-shrink: 0;
   font-size: 13px;
+  line-height: 20px;
   color: #4a4a4a;
   font-variant-numeric: tabular-nums;
 }
@@ -418,6 +420,7 @@ a:focus-visible {
 .done-badge {
   display: inline-flex;
   align-items: center;
+  flex-shrink: 0;
   height: 20px;
   margin-right: 6px;
   padding: 0 7px;
@@ -425,6 +428,7 @@ a:focus-visible {
   background: #eef5e2;
   color: #47631f;
   font-size: 13px;
+  line-height: 1;
 }
 
 .done-badge.failed {
@@ -432,9 +436,15 @@ a:focus-visible {
   color: #b02a2a;
 }
 
+.done-badge.interrupted {
+  background: #f0f0f0;
+  color: #5c5c5c;
+}
+
 .attention-badge {
   display: inline-flex;
   align-items: center;
+  flex-shrink: 0;
   height: 20px;
   margin-right: 6px;
   padding: 0 7px;
@@ -442,6 +452,7 @@ a:focus-visible {
   background: #fdf3dc;
   color: #8a5a00;
   font-size: 13px;
+  line-height: 1;
 }
 
 .running-dot {
@@ -620,7 +631,7 @@ a:focus-visible {
 
 .crumb.current {
   color: var(--text);
-  font-weight: 500;
+  font-weight: 600;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -632,6 +643,7 @@ a:focus-visible {
 
 .project-crumb {
   flex-shrink: 0;
+  font-weight: 600;
 }
 
 .crumb-sep {
@@ -958,10 +970,17 @@ a:focus-visible {
   align-items: center;
   gap: 8px;
   font-size: 16px;
-  font-weight: 500;
+  font-weight: 600;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.session-card-title-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .session-card-meta {
@@ -1260,10 +1279,40 @@ a:focus-visible {
   max-width: min(680px, 84%);
   padding: 10px 16px;
   border-radius: 20px;
-  background: #e4e4e4;
-  font-size: 16px;
+  background: #fde7f2;
+  font-size: 24px;
   line-height: 1.7;
   word-break: break-word;
+}
+
+.user-bubble .markdown {
+  font-size: 24px;
+  line-height: 1.55;
+}
+
+.user-bubble .markdown h1 {
+  font-size: 33px;
+}
+
+.user-bubble .markdown h2 {
+  font-size: 30px;
+}
+
+.user-bubble .markdown h3 {
+  font-size: 27px;
+}
+
+.user-bubble .markdown h4 {
+  font-size: 25.5px;
+}
+
+.user-bubble .markdown code,
+.user-bubble .markdown pre code {
+  font-size: 21px;
+}
+
+.user-bubble .markdown table {
+  font-size: 21px;
 }
 
 .user-bubble .markdown p {
@@ -2646,6 +2695,7 @@ a:focus-visible {
 
 .folder-path {
   display: flex;
+  align-items: center;
   gap: 8px;
 }
 
@@ -2661,6 +2711,12 @@ a:focus-visible {
   color: var(--text);
 }
 
+.folder-hint {
+  margin: 0;
+  font-size: 13px;
+  color: var(--text-soft);
+}
+
 .folder-recents {
   display: flex;
   flex-wrap: wrap;
@@ -2668,61 +2724,21 @@ a:focus-visible {
 }
 
 .folder-recent {
+  flex: 0 0 auto;
   height: 30px;
   padding: 0 10px;
   border: 1px solid var(--border);
   border-radius: 999px;
   background: #ffffff;
-  font-size: 13px;
+  font-size: 14px;
   color: var(--text-soft);
   cursor: pointer;
+  white-space: nowrap;
 }
 
 .folder-recent.active {
   border-color: #4a4a4a;
   color: var(--text);
-}
-
-.folder-list {
-  display: flex;
-  flex-direction: column;
-  max-height: 260px;
-  overflow-y: auto;
-  padding: 4px;
-  border: 1px solid var(--border);
-  border-radius: 12px;
-  background: #ffffff;
-}
-
-.folder-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  height: 34px;
-  padding: 0 10px;
-  border: none;
-  border-radius: 8px;
-  background: transparent;
-  font-size: 14px;
-  color: var(--text);
-  text-align: left;
-  cursor: pointer;
-}
-
-.folder-row:hover {
-  background: #f0f0f0;
-}
-
-.folder-row span {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.folder-empty {
-  margin: 8px 10px;
-  font-size: 13px;
-  color: var(--text-soft);
 }
 
 .folder-error {
@@ -2755,24 +2771,12 @@ a:focus-visible {
 
   .folder-input {
     width: 100%;
+    flex: 1 1 100%;
   }
 
-  .folder-list {
-    max-height: 40vh;
-  }
-
-  .folder-row {
+  .folder-recent {
     height: 44px;
   }
-}
-
-.folder-actions {
-  display: flex;
-  gap: 8px;
-}
-
-.folder-picker .folder-input {
-  width: 100%;
 }
 
 .paste-list {

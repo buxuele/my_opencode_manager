@@ -11,7 +11,7 @@ export default function NewSessionModal({ initialPath, recents, onClose, onCreat
   const [creating, setCreating] = useState(false)
   const [error, setError] = useState('')
 
-  const choose = async () => {
+  const pickFolder = async () => {
     if (picking) return
     setPicking(true)
     setError('')
@@ -49,27 +49,31 @@ export default function NewSessionModal({ initialPath, recents, onClose, onCreat
   return (
     <Modal title="新建会话" onClose={onClose}>
       <div className="folder-picker">
-        {remote ? null : (
-          <div className="folder-actions">
-            <button className="ghost-button" onClick={() => void choose()} disabled={picking}>
+        <div className="folder-path">
+          <input
+            id="session-directory"
+            name="directory"
+            className="folder-input"
+            value={input}
+            onChange={(event) => setInput(event.target.value)}
+            onBlur={() => setPath(input.trim())}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter') setPath(input.trim())
+            }}
+            aria-label="会话目录"
+            placeholder="输入绝对路径，或点浏览选择"
+            data-autofocus
+          />
+          {remote ? null : (
+            <button className="ghost-button" onClick={() => void pickFolder()} disabled={picking}>
               <Icon name="folder" size={15} />
-              {picking ? '等待选择…' : '选择文件夹…'}
+              {picking ? '等待选择' : '浏览'}
             </button>
-          </div>
+          )}
+        </div>
+        {remote ? null : (
+          <p className="folder-hint">浏览会打开系统目录选择框，选中后直接填入路径。</p>
         )}
-        <input
-          id="session-directory"
-          name="directory"
-          className="folder-input"
-          value={input}
-          onChange={(event) => setInput(event.target.value)}
-          onBlur={() => setPath(input.trim())}
-          onKeyDown={(event) => {
-            if (event.key === 'Enter') setPath(input.trim())
-          }}
-          aria-label="会话目录"
-          placeholder="也可以直接输入绝对路径"
-        />
         {recents.length > 0 ? (
           <div className="folder-recents">
             {recents.map((item) => (
