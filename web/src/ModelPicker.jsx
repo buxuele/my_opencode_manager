@@ -130,6 +130,8 @@ export default function ModelPicker({ session, onClose, onPickModel, onPickAgent
         </button>
       </div>
       <input
+        id="model-picker-search"
+        name="search"
         className="text-input"
         value={query}
         onChange={(event) => setQuery(event.target.value)}

@@ -4,38 +4,30 @@ import { Icon } from './Icons'
 import { api } from './api'
 import { shortPath } from './format'
 
-export default function NewSessionModal({ initialPath, recents, onClose, onCreate }) {
+export default function NewSessionModal({ initialPath, recents, onClose, onCreate, remote }) {
   const [path, setPath] = useState(initialPath || '')
   const [input, setInput] = useState(initialPath || '')
   const [picking, setPicking] = useState(false)
   const [creating, setCreating] = useState(false)
   const [error, setError] = useState('')
 
-  const openFinder = async () => {
+  const choose = async () => {
+    if (picking) return
+    setPicking(true)
     setError('')
     try {
-      const result = await api('/show-folder', {
+      const result = await api('/pick-folder', {
         method: 'POST',
-        body: JSON.stringify({ path: input.trim() || path }),
+        body: JSON.stringify({ prompt: '选择项目目录' }),
       })
-      if (result?.path) setPath(result.path)
-      setPicking(true)
-    } catch (err) {
-      setError(err.message)
-    }
-  }
-
-  const readSelection = async () => {
-    setError('')
-    try {
-      const result = await api('/finder-selection')
       if (result?.path) {
         setPath(result.path)
         setInput(result.path)
-        setPicking(false)
       }
     } catch (err) {
-      setError(err.message)
+      if (err.message !== '已取消选择') setError(err.message)
+    } finally {
+      setPicking(false)
     }
   }
 
@@ -57,20 +49,17 @@ export default function NewSessionModal({ initialPath, recents, onClose, onCreat
   return (
     <Modal title="新建会话" onClose={onClose}>
       <div className="folder-picker">
-        <div className="folder-actions">
-          <button className="ghost-button" onClick={() => void openFinder()}>
-            <Icon name="folder" size={15} />
-            在访达中打开
-          </button>
-          <button
-            className="ghost-button"
-            onClick={() => void readSelection()}
-            disabled={!picking}
-          >
-            读取选中的目录
-          </button>
-        </div>
+        {remote ? null : (
+          <div className="folder-actions">
+            <button className="ghost-button" onClick={() => void choose()} disabled={picking}>
+              <Icon name="folder" size={15} />
+              {picking ? '等待选择…' : '选择文件夹…'}
+            </button>
+          </div>
+        )}
         <input
+          id="session-directory"
+          name="directory"
           className="folder-input"
           value={input}
           onChange={(event) => setInput(event.target.value)}

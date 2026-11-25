@@ -12,6 +12,17 @@ import { basename } from './format'
 import { playCompletionSound, unlockAudio } from './sound'
 
 const autoAllowedPermissions = new Set()
+const commandCache = new Map()
+
+async function knownCommands(directory) {
+  if (!directory) return null
+  const cached = commandCache.get(directory)
+  if (cached && Date.now() - cached.time < 30000) return cached.names
+  const result = await api(`/commands?directory=${encodeURIComponent(directory)}`)
+  const names = new Set((result?.data || []).map((item) => item.name).filter(Boolean))
+  commandCache.set(directory, { names, time: Date.now() })
+  return names
+}
 
 async function autoAllowPermissions(sessionId, permissions) {
   for (const request of permissions || []) {
@@ -219,6 +230,14 @@ export default function App() {
   const [liveConnected, setLiveConnected] = useState(false)
   const [bootLoading, setBootLoading] = useState(true)
   const [bootError, setBootError] = useState('')
+  const [machines, setMachines] = useState([{ id: 'local', name: '本机', kind: 'local' }])
+  const [machine, setMachine] = useState(() => {
+    try {
+      return window.localStorage.getItem('ocm_machine') || 'local'
+    } catch {
+      return 'local'
+    }
+  })
 
   const [selectedProject, setSelectedProject] = useState(
     initialRoute.kind === 'project' ? initialRoute.id : 'all',
@@ -531,6 +550,8 @@ export default function App() {
     setBootLoading(true)
     setBootError('')
     try {
+      const machineList = await api('/machines').catch(() => null)
+      if (machineList?.machines) setMachines(machineList.machines)
       const health = await api('/health')
       setService(health)
       if (!health.reachable) {
@@ -655,7 +676,7 @@ export default function App() {
     }
 
     const source = new EventSource(
-      `/api/events?${EVENT_TYPES.map((type) => `types=${encodeURIComponent(type)}`).join('&')}`,
+      `/api/events?${EVENT_TYPES.map((type) => `types=${encodeURIComponent(type)}`).join('&')}&machine=${encodeURIComponent(machine)}`,
     )
     source.onopen = () => setLiveConnected(true)
     source.onerror = () => setLiveConnected(false)
@@ -1023,25 +1044,31 @@ export default function App() {
     const sessionId = current.id
     const command = /^\/([^\s]+)\s*([\s\S]*)$/.exec(text.trim())
     if (command && attachments.length === 0) {
-      setSending(true)
-      try {
-        await api(`/sessions/${sessionId}/command`, {
-          method: 'POST',
-          body: JSON.stringify({
-            name: command[1],
-            arguments: command[2].trim(),
-            text: text.trim(),
-          }),
-        })
-        notify(`已执行 /${command[1]}`, 'success')
-        void loadSessions().catch(() => {})
-        void syncSession(sessionId, { force: true, limit: 6 }).catch(() => {})
-        return true
-      } catch (error) {
-        notify(error.message)
-        return false
-      } finally {
-        setSending(false)
+      const directory = sessionRef.current?.info?.location?.directory
+      const names = await knownCommands(directory).catch(() => null)
+      if (names && names.has(command[1])) {
+        setSending(true)
+        try {
+          await api(`/sessions/${sessionId}/command`, {
+            method: 'POST',
+            body: JSON.stringify({
+              name: command[1],
+              arguments: command[2].trim(),
+              text: text.trim(),
+            }),
+          })
+          notify(`已执行 /${command[1]}`, 'success')
+          void loadSessions().catch(() => {})
+          void syncSession(sessionId, { force: true, limit: 6 }).catch(() => {})
+          return true
+        } catch (error) {
+          if (error.status !== 404) {
+            notify(error.message)
+            return false
+          }
+        } finally {
+          setSending(false)
+        }
       }
     }
     const running = Boolean(activeRef.current[sessionId])
@@ -1503,6 +1530,17 @@ export default function App() {
         service={service}
         liveConnected={liveConnected}
         activeCount={activeCount}
+        machines={machines}
+        machine={machine}
+        onSwitchMachine={(next) => {
+          try {
+            window.localStorage.setItem('ocm_machine', next)
+          } catch {
+            /* 浏览器禁用存储时只在本次生效 */
+          }
+          setMachine(next)
+          window.location.reload()
+        }}
         open={sidebarOpen}
         onClose={() => setSidebarOpen(false)}
         now={now}
@@ -1590,6 +1628,7 @@ export default function App() {
               loading={sessionLoading}
               busy={running}
               stopping={stopping}
+              remote={machine !== 'local'}
               breadcrumb={breadcrumbNode}
               olderCursor={session?.olderCursor}
               loadingOlder={loadingOlder}
@@ -1641,6 +1680,7 @@ export default function App() {
           }))}
           onClose={() => setModal(null)}
           onCreate={(path) => createSessionAt(path)}
+          remote={machine !== 'local'}
         />
       ) : null}
 
@@ -1715,6 +1755,8 @@ export default function App() {
             </div>
             <label className="gray-slider">
               <input
+                id="background-gray"
+                name="background"
                 type="range"
                 min={GRAY_MIN}
                 max={GRAY_MAX}

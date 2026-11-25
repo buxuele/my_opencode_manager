@@ -175,7 +175,6 @@ export default function Overview({
                     <span className="session-time" title={formatDate(item.time?.updated)}>
                       {relativeTime(item.time?.updated, now)}
                     </span>
-                    <Icon name="chevronRight" size={16} className="row-chevron" />
                   </span>
                 </button>
               )

@@ -3,6 +3,8 @@ import json
 import os
 import shlex
 import subprocess
+from contextvars import ContextVar
+from urllib.parse import quote
 from pathlib import Path
 
 import httpx
@@ -13,9 +15,62 @@ from fastapi.staticfiles import StaticFiles
 ROOT = Path(__file__).resolve().parent
 DIST = ROOT / "dist"
 SERVICE_FILE = Path.home() / ".local" / "state" / "opencode" / "service.json"
+MACHINES_FILE = ROOT / ".machines.json"
 API_TIMEOUT = httpx.Timeout(60.0, connect=5.0)
+CURRENT_MACHINE = ContextVar("current_machine", default="local")
 
 app = FastAPI(title="opencode")
+
+
+@app.middleware("http")
+async def bind_machine(request: Request, call_next):
+    machine = request.headers.get("x-opc-machine") or request.query_params.get("machine") or "local"
+    token = CURRENT_MACHINE.set(machine)
+    try:
+        return await call_next(request)
+    finally:
+        CURRENT_MACHINE.reset(token)
+
+
+def read_remote_machines():
+    if not MACHINES_FILE.exists():
+        return []
+    try:
+        raw = json.loads(MACHINES_FILE.read_text())
+    except (OSError, ValueError):
+        return []
+    items = raw.get("machines") if isinstance(raw, dict) else raw
+    if not isinstance(items, list):
+        return []
+    return [
+        item
+        for item in items
+        if isinstance(item, dict) and item.get("id") and item.get("url") and item.get("password")
+    ]
+
+
+def machine_list():
+    machines = [{"id": "local", "name": "本机", "kind": "local"}]
+    for item in read_remote_machines():
+        machines.append({"id": item["id"], "name": item.get("name") or item["id"], "kind": "remote"})
+    return machines
+
+
+def machine_config(machine=None):
+    mid = machine or CURRENT_MACHINE.get() or "local"
+    if mid == "local":
+        service = read_service()
+        return {
+            "id": "local",
+            "url": service["url"],
+            "password": service["password"],
+            "version": service.get("version"),
+            "pid": service.get("pid"),
+        }
+    for item in read_remote_machines():
+        if item["id"] == mid:
+            return {"id": mid, "url": item["url"], "password": item["password"]}
+    raise HTTPException(status_code=404, detail=f"没有配置这台机器：{mid}")
 
 
 def read_service():
@@ -35,8 +90,66 @@ def read_service():
     return raw
 
 
-def upstream(timeout=None):
-    service = read_service()
+def remote_cfg(machine=None):
+    cfg = machine_config(machine)
+    return cfg if cfg["id"] != "local" else None
+
+
+def curl_url(cfg, path, params=None):
+    url = cfg["url"].rstrip("/") + path
+    if params:
+        items = params.items() if isinstance(params, dict) else params
+        query = "&".join(f"{quote(str(key))}={quote(str(value))}" for key, value in items)
+        url = f"{url}?{query}"
+    return url
+
+
+async def curl_call(cfg, method, path, params=None, body=None, timeout=60):
+    args = [
+        "curl",
+        "-sS",
+        "--noproxy",
+        "*",
+        "-m",
+        str(timeout),
+        "-u",
+        f"opencode:{cfg['password']}",
+        "-X",
+        method,
+        curl_url(cfg, path, params),
+        "-w",
+        "\n%{http_code}",
+    ]
+    if body is not None:
+        args[-4:-4] = ["-H", "Content-Type: application/json", "--data-binary", json.dumps(body)]
+    proc = await asyncio.create_subprocess_exec(
+        *args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+    )
+    out, err = await proc.communicate()
+    text = out.decode(errors="replace")
+    if not text:
+        detail = err.decode(errors="replace").strip() or f"无法连接 {cfg['url']}"
+        raise HTTPException(status_code=502, detail=f"连接远端服务失败：{detail}")
+    payload, _, status_text = text.rpartition("\n")
+    try:
+        status = int(status_text.strip())
+    except ValueError:
+        status, payload = 0, text
+    if status == 0:
+        raise HTTPException(status_code=502, detail="远端返回内容无法解析")
+    if status == 204:
+        return Response(status_code=204)
+    if status >= 400:
+        try:
+            detail = json.loads(payload).get("detail") or json.loads(payload)
+        except (ValueError, AttributeError):
+            detail = payload[:300] or f"opencode 返回 {status}"
+        raise HTTPException(status_code=status, detail=detail)
+    return json.loads(payload) if payload.strip() else None
+
+
+def upstream(timeout=None, machine=None):
+    service = machine_config(machine)
     return httpx.AsyncClient(
         base_url=service["url"],
         auth=httpx.BasicAuth("opencode", service["password"]),
@@ -46,7 +159,13 @@ def upstream(timeout=None):
 
 
 async def call(method, path, **kwargs):
-    async with upstream() as client:
+    machine = kwargs.pop("machine", None)
+    cfg = machine_config(machine)
+    if cfg["id"] != "local":
+        return await curl_call(
+            cfg, method, path, params=kwargs.get("params"), body=kwargs.get("json")
+        )
+    async with upstream(machine=machine) as client:
         try:
             resp = await client.request(method, path, **kwargs)
         except httpx.HTTPError as exc:
@@ -62,35 +181,53 @@ async def call(method, path, **kwargs):
     return resp.json()
 
 
+@app.get("/api/machines")
+async def machines():
+    return {"current": CURRENT_MACHINE.get(), "machines": machine_list()}
+
+
 @app.get("/api/health")
 async def health():
-    service = read_service()
+    service = machine_config()
     reachable = True
     info = None
-    try:
-        async with upstream(httpx.Timeout(5.0, connect=3.0)) as client:
-            resp = await client.get("/api/info")
-            reachable = resp.status_code < 500
-            if resp.status_code == 200:
-                info = resp.json()
-    except httpx.HTTPError:
-        reachable = False
+    if service["id"] == "local":
+        try:
+            async with upstream(httpx.Timeout(5.0, connect=3.0)) as client:
+                resp = await client.get("/api/info")
+                reachable = resp.status_code < 500
+                if resp.status_code == 200:
+                    info = resp.json()
+        except httpx.HTTPError:
+            reachable = False
+    else:
+        try:
+            info = await curl_call(service, "GET", "/api/info", timeout=6)
+        except HTTPException:
+            reachable = False
+    version = service.get("version")
+    if isinstance(info, dict) and info.get("version"):
+        version = info["version"]
     return {
         "reachable": reachable,
         "url": service.get("url"),
-        "version": service.get("version"),
+        "version": version,
         "pid": service.get("pid"),
         "info": info,
+        "machine": service["id"],
     }
 
 
 @app.get("/api/projects")
 async def projects():
     items = await call("GET", "/api/project", params={"archived": "false"})
+    local = CURRENT_MACHINE.get() == "local"
     if isinstance(items, list):
         for item in items:
             canonical = item.get("canonical") or ""
-            item["exists"] = bool(canonical) and Path(canonical).expanduser().is_dir()
+            item["exists"] = (
+                bool(canonical) and Path(canonical).expanduser().is_dir() if local else True
+            )
     return items
 
 
@@ -294,17 +431,62 @@ async def events(
     request: Request,
     types: list[str] | None = Query(default=None),
     session: str | None = None,
+    machine: str | None = None,
 ):
+    target_machine = machine or CURRENT_MACHINE.get()
+    target_cfg = machine_config(target_machine)
     params = [("types", item) for item in (types or [])]
     if session:
         params.append(("session", session))
+
+    if target_cfg["id"] != "local":
+        event_url = curl_url(target_cfg, "/api/event", params)
+        auth = f"opencode:{target_cfg['password']}"
+
+        async def remote_stream():
+            while True:
+                if await request.is_disconnected():
+                    return
+                proc = await asyncio.create_subprocess_exec(
+                    "curl", "-sS", "-N", "--noproxy", "*", "-m", "0",
+                    "-u", auth, "-H", "Accept: text/event-stream", event_url,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.DEVNULL,
+                )
+                try:
+                    while True:
+                        chunk = await proc.stdout.read(4096)
+                        if not chunk:
+                            break
+                        if await request.is_disconnected():
+                            return
+                        yield chunk
+                finally:
+                    if proc.returncode is None:
+                        proc.kill()
+                if await request.is_disconnected():
+                    return
+                yield b": relay heartbeat\n\n"
+                await asyncio.sleep(1)
+
+        return StreamingResponse(
+            remote_stream(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache, no-transform",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            },
+        )
 
     async def stream():
         while True:
             if await request.is_disconnected():
                 return
             try:
-                async with upstream(httpx.Timeout(None, connect=10.0)) as client:
+                async with upstream(
+                    httpx.Timeout(None, connect=10.0), machine=target_machine
+                ) as client:
                     async with client.stream("GET", "/api/event", params=params or None) as resp:
                         if resp.status_code >= 400:
                             yield b"event: error\ndata: upstream rejected\n\n"
@@ -331,54 +513,45 @@ async def events(
     )
 
 
-@app.post("/api/show-folder")
-def show_folder(payload: dict = Body(default={})):
-    raw = str(payload.get("path") or "").strip() or str(Path.home())
-    directory = Path(raw).expanduser()
-    if not directory.is_dir():
-        directory = Path.home()
-    escaped = str(directory).replace("\\", "\\\\").replace('"', '\\"')
-    script = (
-        'tell application "Finder"\n'
-        "activate\n"
-        f'open (POSIX file "{escaped}" as alias)\n'
-        "end tell"
-    )
-    result = subprocess.run(
-        ["osascript", "-e", script], capture_output=True, text=True, timeout=10
-    )
-    if result.returncode != 0:
-        detail = (result.stderr or result.stdout or "").strip()
-        raise HTTPException(status_code=500, detail=f"打开访达失败：{detail or '未知错误'}")
-    return {"path": str(directory)}
+def require_local():
+    if CURRENT_MACHINE.get() != "local":
+        raise HTTPException(status_code=400, detail="远端机器不支持本地目录与终端操作")
 
 
-@app.get("/api/finder-selection")
-def finder_selection():
+@app.post("/api/pick-folder")
+def pick_folder(payload: dict = Body(default={})):
+    require_local()
+    prompt = str(payload.get("prompt") or "选择项目目录").replace('"', '\\"')
     script = (
-        'tell application "Finder"\n'
-        "set sel to selection\n"
-        "if (count of sel) is 0 then return \"\"\n"
-        "return POSIX path of (item 1 of sel as alias)\n"
-        "end tell"
+        'tell application "Finder" to activate\n'
+        "try\n"
+        f'  set chosen to choose folder with prompt "{prompt}"\n'
+        "  return POSIX path of chosen\n"
+        "on error number -128\n"
+        '  return ""\n'
+        "end try"
     )
-    result = subprocess.run(
-        ["osascript", "-e", script], capture_output=True, text=True, timeout=10
-    )
+    try:
+        result = subprocess.run(
+            ["osascript", "-e", script], capture_output=True, text=True, timeout=600
+        )
+    except subprocess.TimeoutExpired:
+        raise HTTPException(status_code=408, detail="选择目录超时")
     if result.returncode != 0:
-        detail = (result.stderr or result.stdout or "").strip()
-        raise HTTPException(status_code=500, detail=f"读取访达选区失败：{detail or '未知错误'}")
+        detail = (result.stderr or "").strip()
+        raise HTTPException(status_code=500, detail=f"系统目录选择失败：{detail or '未知错误'}")
     chosen = result.stdout.strip().rstrip("/") or ""
     if not chosen:
-        raise HTTPException(status_code=404, detail="访达里还没有选中文件夹")
+        raise HTTPException(status_code=400, detail="已取消选择")
     directory = Path(chosen)
     if not directory.is_dir():
-        raise HTTPException(status_code=400, detail="请选中一个文件夹，而不是文件")
+        raise HTTPException(status_code=400, detail="选择的不是文件夹")
     return {"path": str(directory)}
 
 
 @app.post("/api/run")
 async def run_project(payload: dict = Body(...)):
+    require_local()
     raw_path = str(payload.get("path", "")).strip()
     if not raw_path:
         raise HTTPException(status_code=400, detail="缺少目录路径")
@@ -414,6 +587,7 @@ async def run_project(payload: dict = Body(...)):
 
 @app.post("/api/reveal")
 async def reveal(payload: dict = Body(...)):
+    require_local()
     raw_path = str(payload.get("path", "")).strip()
     target = str(payload.get("target", "finder"))
     select = bool(payload.get("select"))

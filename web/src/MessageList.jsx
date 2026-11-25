@@ -450,6 +450,7 @@ export function SessionHeader({
   session,
   busy,
   breadcrumb,
+  remote,
   onRename,
   onDelete,
   onOpenFolder,
@@ -466,14 +467,18 @@ export function SessionHeader({
           {info?.parentID ? <span className="soft-pill">子会话</span> : null}
         </div>
         <div className="session-actions">
-          <button className="ghost-button" onClick={onRun}>
-            <Icon name="play" size={16} />
-            运行
-          </button>
-          <button className="ghost-button" onClick={onOpenFolder} title="打开项目的上级目录">
-            <Icon name="folder" size={16} />
-            打开
-          </button>
+          {remote ? null : (
+            <button className="ghost-button" onClick={onRun}>
+              <Icon name="play" size={16} />
+              运行
+            </button>
+          )}
+          {remote ? null : (
+            <button className="ghost-button" onClick={onOpenFolder} title="打开项目的上级目录">
+              <Icon name="folder" size={16} />
+              打开
+            </button>
+          )}
           <button className="ghost-button" onClick={onRename}>
             <Icon name="pencil" size={16} />
             重命名

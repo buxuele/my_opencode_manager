@@ -33,6 +33,9 @@ export default function Sidebar({
   onTogglePin,
   onRefresh,
   onOpenSettings,
+  machines,
+  machine,
+  onSwitchMachine,
 }) {
   const searchRef = useRef(null)
   const scrollRef = useRef(null)
@@ -64,7 +67,6 @@ export default function Sidebar({
   }, [])
 
   const keyword = query.trim().toLowerCase()
-  const hasPinned = pinned.length > 0
 
   const sessionsByProject = useMemo(() => {
     const map = new Map()
@@ -174,6 +176,24 @@ export default function Sidebar({
         </button>
       </div>
 
+      {machines.length > 1 ? (
+        <div className="machine-tabs" role="tablist" aria-label="机器">
+          {machines.map((item) => (
+            <button
+              key={item.id}
+              className={`machine-tab ${machine === item.id ? 'on' : ''}`}
+              role="tab"
+              aria-selected={machine === item.id}
+              onClick={() => {
+                if (machine !== item.id) onSwitchMachine(item.id)
+              }}
+            >
+              {item.name}
+            </button>
+          ))}
+        </div>
+      ) : null}
+
       <div className="search-box">
         <Icon name="search" size={17} />
         <input
@@ -234,30 +254,22 @@ export default function Sidebar({
                 className={`project-row ${selectedProject === project.id ? 'active' : ''}`}
                 onContextMenu={(event) => openMenu(event, project)}
               >
+                {pinned.includes(project.id) ? (
+                  <span className="pin-mark" title="已置顶">
+                    <Icon name="barUp" size={13} />
+                  </span>
+                ) : null}
                 <button
                   className="project-open"
                   onClick={() => toggleProject(project.id)}
                   title={shortPath(project.canonical)}
                 >
-                  {hasPinned ? (
-                    <span className="pin-mark" title={pinned.includes(project.id) ? '已置顶' : ''}>
-                      {pinned.includes(project.id) ? <Icon name="barUp" size={13} /> : null}
-                    </span>
-                  ) : null}
-                  {activeProjects.has(project.id) ? (
-                    <span className="running-dot project-running-dot" />
-                  ) : null}
                   <span className="project-name">{name}</span>
                 </button>
+                {activeProjects.has(project.id) ? (
+                  <span className="running-dot project-running-dot" />
+                ) : null}
                 <span className="project-count">{count}</span>
-                <button
-                  className="project-expand"
-                  onClick={() => toggleProject(project.id)}
-                  aria-expanded={isOpen}
-                  aria-label={isOpen ? `收起 ${name}` : `展开 ${name}`}
-                >
-                  <Icon name={isOpen ? 'chevronDown' : 'chevronRight'} size={15} />
-                </button>
               </div>
 
               {isOpen ? (
@@ -274,7 +286,6 @@ export default function Sidebar({
                         onClick={() => onOpenSession(item.id, item.projectID)}
                         title={`${item.title || '未命名会话'} · ${stamp}`}
                       >
-                        {running ? <span className="running-dot" /> : null}
                         <span className="project-session-title">
                           {item.title || '未命名会话'}
                         </span>
@@ -290,6 +301,7 @@ export default function Sidebar({
                             {completed[item.id] === 'failed' ? '失败' : '已完成'}
                           </span>
                         ) : null}
+                        {running ? <span className="running-dot project-session-dot" /> : null}
                         <span className="project-session-time">{stamp}</span>
                       </button>
                     )
@@ -350,6 +362,7 @@ export default function Sidebar({
             <Icon name="chevronRight" size={15} />
             <span>打开项目页</span>
           </button>
+          {machine === 'local' ? (
           <button
             className="context-item"
             role="menuitem"
@@ -358,6 +371,8 @@ export default function Sidebar({
             <Icon name="folder" size={15} />
             <span>打开目录</span>
           </button>
+          ) : null}
+          {machine === 'local' ? (
           <button
             className="context-item"
             role="menuitem"
@@ -368,6 +383,8 @@ export default function Sidebar({
             <Icon name="terminal" size={15} />
             <span>在终端打开</span>
           </button>
+          ) : null}
+          {machine === 'local' ? (
           <button
             className="context-item"
             role="menuitem"
@@ -376,6 +393,7 @@ export default function Sidebar({
             <Icon name="copy" size={15} />
             <span>复制启动命令</span>
           </button>
+          ) : null}
           <div className="context-sep" />
           <button
             className="context-item"

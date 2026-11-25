@@ -18,6 +18,8 @@ function FieldInput({ field, value, onChange }) {
     return (
       <label className="pending-check">
         <input
+          id={`field-${field.key}`}
+          name={field.key}
           type="checkbox"
           checked={Boolean(value)}
           onChange={(event) => onChange(event.target.checked)}

@@ -32,6 +32,7 @@ export default function SessionView({
   sending,
   project,
   breadcrumb,
+  remote,
 }) {
   const ready = session && session.info && session.info.id === sessionId
 
@@ -64,6 +65,7 @@ export default function SessionView({
         session={session}
         busy={busy}
         breadcrumb={breadcrumb}
+        remote={remote}
         onRename={onRename}
         onDelete={onDelete}
         onOpenFolder={onOpenFolder}
