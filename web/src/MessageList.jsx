@@ -1,6 +1,9 @@
 import { memo, useEffect, useMemo, useRef, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
+
+const INITIAL_RENDER = 12
+const RENDER_STEP = 8
 import { Icon } from './Icons'
 import { duration, formatClock, formatElapsed, modelLabel } from './format'
 import { api } from './api'
@@ -48,7 +51,7 @@ function toolOutput(part) {
 function statusLabel(status) {
   if (status === 'running') return '运行中'
   if (status === 'completed') return '完成'
-  if (status === 'error' || status === 'failed') return '失败'
+  if (status === 'error' || status === 'failed') return '本步失败'
   if (status === 'pending') return '等待'
   return status || '记录'
 }
@@ -116,7 +119,7 @@ function Reasoning({ part, done }) {
   )
 }
 
-function AssistantMessage({ message, onUndo, onRegenerate, onCompact, showActions, isLast }) {
+function AssistantMessage({ message, onUndo, onRegenerate, onCompact, showActions, isLast, errorState }) {
   const [copied, setCopied] = useState(false)
   const copyTimer = useRef(null)
   const parts = Array.isArray(message.content) ? message.content : []
@@ -144,6 +147,30 @@ function AssistantMessage({ message, onUndo, onRegenerate, onCompact, showAction
 
   const errorText = message.error?.message || ''
   const interrupted = /interrupt/i.test(errorText)
+  const stepInterrupted = /step interrupted/i.test(errorText)
+
+  let errorNode = null
+  if (message.error) {
+    if (errorState === 'terminal') {
+      errorNode = <p className="message-error">执行失败：{errorText || '未知错误'}</p>
+    } else if (errorState === 'retried') {
+      errorNode = (
+        <p className="message-note">
+          {stepInterrupted ? '本步已中断，后续继续' : '本次尝试失败，后续已重试'}
+        </p>
+      )
+    } else if (errorState === 'retry') {
+      errorNode = (
+        <p className="message-note">
+          {stepInterrupted ? '本步已中断，正在继续' : '本次尝试失败，正在重试'}
+        </p>
+      )
+    } else if (errorState === 'interrupted' || interrupted) {
+      errorNode = <p className="message-note">本轮已中断</p>
+    } else {
+      errorNode = <p className="message-note">本次尝试失败</p>
+    }
+  }
 
   if (visible.length === 0) return null
   return (
@@ -159,13 +186,7 @@ function AssistantMessage({ message, onUndo, onRegenerate, onCompact, showAction
           }
           return <ToolCard key={part.id || `tool-${index}`} part={part} />
         })}
-        {message.error ? (
-          interrupted ? (
-            <p className="message-note">本轮已中断</p>
-          ) : (
-            <p className="message-error">执行失败：{errorText || '未知错误'}</p>
-          )
-        ) : null}
+        {errorNode}
         {plainText || isLast ? (
         <div className="message-foot">
           <span>{formatClock(message.time?.created)}</span>
@@ -257,7 +278,7 @@ function ShellMessage({ message }) {
   )
 }
 
-const MessageItem = memo(function MessageItem({ message, onCancelQueued, onOpenAttachment, actions, isLast }) {
+const MessageItem = memo(function MessageItem({ message, onCancelQueued, onOpenAttachment, actions, isLast, errorState }) {
   if (!message) return null
   if (message.type === 'user') {
     return (
@@ -277,6 +298,7 @@ const MessageItem = memo(function MessageItem({ message, onCancelQueued, onOpenA
         onCompact={actions?.onCompact}
         showActions={Boolean(actions)}
         isLast={isLast}
+        errorState={errorState}
       />
     )
   }
@@ -299,6 +321,7 @@ export default function MessageList({
   messages,
   sessionId,
   busy,
+  sessionOutcome,
   startedAt,
   onCancelQueued,
   olderCursor,
@@ -342,6 +365,32 @@ export default function MessageList({
     [messages],
   )
 
+  const [renderCount, setRenderCount] = useState(INITIAL_RENDER)
+  const settled = useRef(false)
+
+  useEffect(() => {
+    settled.current = false
+    setRenderCount(INITIAL_RENDER)
+  }, [sessionId])
+
+  useEffect(() => {
+    if (settled.current) return
+    if (renderCount >= visible.length) {
+      settled.current = true
+      return
+    }
+    const timer = setTimeout(() => {
+      setRenderCount((count) => Math.min(visible.length, count + RENDER_STEP))
+    }, 30)
+    return () => clearTimeout(timer)
+  }, [renderCount, visible.length])
+
+  useEffect(() => {
+    const node = scrollRef.current
+    if (!node || !atBottom) return
+    node.scrollTop = node.scrollHeight
+  }, [renderCount, atBottom])
+
   const lastAssistantId = useMemo(() => {
     for (let index = visible.length - 1; index >= 0; index -= 1) {
       const item = visible[index]
@@ -349,6 +398,16 @@ export default function MessageList({
     }
     return null
   }, [visible])
+
+  const lastAssistantAnyId = useMemo(() => {
+    for (let index = visible.length - 1; index >= 0; index -= 1) {
+      if (visible[index].type === 'assistant') return visible[index].id
+    }
+    return null
+  }, [visible])
+
+  const shown =
+    settled.current || renderCount >= visible.length ? visible : visible.slice(-renderCount)
 
   useEffect(() => {
     const node = scrollRef.current
@@ -413,20 +472,31 @@ export default function MessageList({
               <p>还没有消息，在下面输入开始这一轮</p>
             </div>
           ) : null}
-          {visible.map((message) => (
-            <MessageItem
-              key={message.id}
-              message={message}
-              onCancelQueued={onCancelQueued}
-              onOpenAttachment={onOpenAttachment}
-              isLast={message.id === visible[visible.length - 1]?.id}
-              actions={
-                !busy && message.id === lastAssistantId
-                  ? { onUndo, onRegenerate, onCompact }
-                  : null
-              }
-            />
-          ))}
+          {shown.map((message) => {
+            let errorState = ''
+            if (message.error) {
+              if (message.id !== lastAssistantAnyId) errorState = 'retried'
+              else if (busy) errorState = 'retry'
+              else if (sessionOutcome === 'failed') errorState = 'terminal'
+              else if (sessionOutcome === 'interrupted') errorState = 'interrupted'
+              else errorState = 'single'
+            }
+            return (
+              <MessageItem
+                key={message.id}
+                message={message}
+                onCancelQueued={onCancelQueued}
+                onOpenAttachment={onOpenAttachment}
+                isLast={message.id === visible[visible.length - 1]?.id}
+                errorState={errorState}
+                actions={
+                  !busy && message.id === lastAssistantId
+                    ? { onUndo, onRegenerate, onCompact }
+                    : null
+                }
+              />
+            )
+          })}
           {busy ? (
             <div className="thinking-row">
               <span className="assistant-avatar">oc</span>
@@ -470,7 +540,7 @@ export function SessionHeader({
             <Icon name="play" size={16} />
             运行
           </button>
-          <button className="ghost-button" onClick={onOpenFolder} title="打开项目的上级目录">
+          <button className="ghost-button" onClick={onOpenFolder} title="在文件管理器中打开项目">
             <Icon name="folder" size={16} />
             打开
           </button>

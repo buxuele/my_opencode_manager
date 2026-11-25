@@ -11,31 +11,23 @@ export default function NewSessionModal({ initialPath, recents, onClose, onCreat
   const [creating, setCreating] = useState(false)
   const [error, setError] = useState('')
 
-  const openFinder = async () => {
+  const pickFolder = async () => {
+    if (picking) return
+    setPicking(true)
     setError('')
     try {
-      const result = await api('/show-folder', {
+      const result = await api('/pick-folder', {
         method: 'POST',
         body: JSON.stringify({ path: input.trim() || path }),
       })
-      if (result?.path) setPath(result.path)
-      setPicking(true)
-    } catch (err) {
-      setError(err.message)
-    }
-  }
-
-  const readSelection = async () => {
-    setError('')
-    try {
-      const result = await api('/finder-selection')
       if (result?.path) {
         setPath(result.path)
         setInput(result.path)
-        setPicking(false)
       }
     } catch (err) {
       setError(err.message)
+    } finally {
+      setPicking(false)
     }
   }
 
@@ -57,30 +49,25 @@ export default function NewSessionModal({ initialPath, recents, onClose, onCreat
   return (
     <Modal title="新建会话" onClose={onClose}>
       <div className="folder-picker">
-        <div className="folder-actions">
-          <button className="ghost-button" onClick={() => void openFinder()}>
+        <div className="folder-path">
+          <input
+            className="folder-input"
+            value={input}
+            onChange={(event) => setInput(event.target.value)}
+            onBlur={() => setPath(input.trim())}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter') setPath(input.trim())
+            }}
+            aria-label="会话目录"
+            placeholder="输入绝对路径，或点浏览选择"
+            data-autofocus
+          />
+          <button className="ghost-button" onClick={() => void pickFolder()} disabled={picking}>
             <Icon name="folder" size={15} />
-            在访达中打开
-          </button>
-          <button
-            className="ghost-button"
-            onClick={() => void readSelection()}
-            disabled={!picking}
-          >
-            读取选中的目录
+            {picking ? '等待选择' : '浏览'}
           </button>
         </div>
-        <input
-          className="folder-input"
-          value={input}
-          onChange={(event) => setInput(event.target.value)}
-          onBlur={() => setPath(input.trim())}
-          onKeyDown={(event) => {
-            if (event.key === 'Enter') setPath(input.trim())
-          }}
-          aria-label="会话目录"
-          placeholder="也可以直接输入绝对路径"
-        />
+        <p className="folder-hint">浏览会打开系统目录选择框，选中后直接填入路径。</p>
         {recents.length > 0 ? (
           <div className="folder-recents">
             {recents.map((item) => (

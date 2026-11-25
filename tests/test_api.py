@@ -5,7 +5,7 @@ import tempfile
 
 import httpx
 
-BASE = os.environ.get("OCM_BASE", "http://127.0.0.1:8860")
+BASE = os.environ.get("OCM_BASE", "http://127.0.0.1:7860")
 PASSED = []
 
 
@@ -21,6 +21,23 @@ def main():
 
     health = client.get("/api/health").json()
     check("服务健康", health.get("reachable") is True, f"版本 {health.get('version')}")
+
+    platform = client.get("/api/platform").json()
+    check(
+        "平台信息",
+        platform.get("name") in {"windows", "macos", "linux"}
+        and platform.get("script") in {"just_run.bat", "just_run.sh"},
+        f"{platform.get('label')} · {platform.get('folderLabel')}",
+    )
+
+    preferences = client.get("/api/preferences").json()
+    check(
+        "偏好读取",
+        isinstance(preferences.get("initialized"), bool)
+        and isinstance(preferences.get("settings", {}).get("completionSound"), bool)
+        and isinstance(preferences.get("pinnedProjects"), list),
+        str(preferences.get("settings")),
+    )
 
     projects = client.get("/api/projects").json()
     check("项目列表", isinstance(projects, list) and len(projects) > 0, f"{len(projects)} 个项目")
@@ -45,7 +62,8 @@ def main():
         no_script = client.post("/api/run", json={"path": empty_dir})
     check(
         "运行缺少脚本",
-        no_script.status_code == 404 and "just_run.sh" in str(no_script.json().get("detail")),
+        no_script.status_code == 404
+        and ("just_run.bat" in str(no_script.json().get("detail")) or "just_run.sh" in str(no_script.json().get("detail"))),
         str(no_script.status_code),
     )
     created = client.post(

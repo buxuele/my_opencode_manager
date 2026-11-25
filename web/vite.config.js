@@ -9,11 +9,11 @@ export default defineConfig({
   },
   server: {
     host: '127.0.0.1',
-    port: 8861,
+    port: 7861,
     strictPort: true,
     proxy: {
       '/api': {
-        target: 'http://127.0.0.1:8860',
+        target: 'http://127.0.0.1:7860',
         changeOrigin: true,
       },
     },

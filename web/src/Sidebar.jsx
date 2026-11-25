@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Icon, Logo } from './Icons'
-import { basename, relativeTime, shortPath } from './format'
+import { basename, outcomeBadge, relativeTime, shortPath } from './format'
 
 export default function Sidebar({
   projects,
@@ -33,6 +33,8 @@ export default function Sidebar({
   onTogglePin,
   onRefresh,
   onOpenSettings,
+  shortcut,
+  folderLabel,
 }) {
   const searchRef = useRef(null)
   const scrollRef = useRef(null)
@@ -199,7 +201,7 @@ export default function Sidebar({
             <Icon name="x" size={14} />
           </button>
         ) : (
-          <kbd>⌘K</kbd>
+          <kbd>{shortcut || 'Ctrl K'}</kbd>
         )}
       </div>
 
@@ -265,6 +267,7 @@ export default function Sidebar({
                   {shown.map((item) => {
                     const running = Boolean(active[item.id])
                     const stamp = relativeTime(item.time?.updated, now)
+                    const badge = completed?.[item.id] ? outcomeBadge(completed[item.id]) : null
                     return (
                       <button
                         key={item.id}
@@ -281,14 +284,8 @@ export default function Sidebar({
                         {attention?.[item.id] ? (
                           <span className="attention-badge">待处理</span>
                         ) : null}
-                        {completed?.[item.id] ? (
-                          <span
-                            className={`done-badge ${
-                              completed[item.id] === 'failed' ? 'failed' : ''
-                            }`}
-                          >
-                            {completed[item.id] === 'failed' ? '失败' : '已完成'}
-                          </span>
+                        {badge ? (
+                          <span className={`done-badge ${badge.className}`}>{badge.label}</span>
                         ) : null}
                         <span className="project-session-time">{stamp}</span>
                       </button>
@@ -356,7 +353,7 @@ export default function Sidebar({
             onClick={() => runMenuAction((item) => onOpenProjectFolder(item, 'finder'), menu.project)}
           >
             <Icon name="folder" size={15} />
-            <span>打开目录</span>
+            <span>在{folderLabel || '文件管理器'}中打开</span>
           </button>
           <button
             className="context-item"

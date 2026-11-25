@@ -8,7 +8,8 @@ import NewSessionModal from './NewSessionModal'
 import Modal from './Modal'
 import Toast from './Toast'
 import { Icon, Logo } from './Icons'
-import { basename } from './format'
+import { basename, parentPath } from './format'
+import { detectPlatform } from './platform'
 import { playCompletionSound, unlockAudio } from './sound'
 
 const autoAllowedPermissions = new Set()
@@ -103,7 +104,13 @@ function mergeMessage(known, item) {
   known.set(item.id, item)
 }
 
-async function loadRecentMessages(sessionId, limit = 80) {
+const INITIAL_MESSAGE_LIMIT = 12
+const FILL_MESSAGE_LIMIT = 18
+const LOAD_OLDER_LIMIT = 30
+const RECENT_MESSAGE_LIMIT = 80
+const TERMINAL_GRACE = 2500
+
+async function loadRecentMessages(sessionId, limit = RECENT_MESSAGE_LIMIT) {
   const page = await api(`/sessions/${sessionId}/messages?limit=${limit}&order=desc`)
   return {
     messages: (page?.data || []).slice().reverse(),
@@ -178,6 +185,7 @@ function shadeColor(hex, ratio) {
 }
 
 const PINNED_KEY = 'ocm_pinned_projects'
+const SETTINGS_KEY = 'ocm_settings'
 
 function loadPinnedProjects() {
   try {
@@ -189,9 +197,17 @@ function loadPinnedProjects() {
   }
 }
 
+function cachePinnedProjects(list) {
+  try {
+    window.localStorage.setItem(PINNED_KEY, JSON.stringify(list))
+  } catch {
+    /* 浏览器禁用存储时只在本次会话生效 */
+  }
+}
+
 function loadSettings() {
   try {
-    const raw = window.localStorage.getItem('ocm_settings')
+    const raw = window.localStorage.getItem(SETTINGS_KEY)
     const stored = raw ? JSON.parse(raw) : {}
     return { ...DEFAULT_SETTINGS, ...stored, background: normalizeBackground(stored.background) }
   } catch {
@@ -201,7 +217,7 @@ function loadSettings() {
 
 function saveSettings(settings) {
   try {
-    window.localStorage.setItem('ocm_settings', JSON.stringify(settings))
+    window.localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings))
   } catch {
     /* 浏览器禁用存储时只在本次会话生效 */
   }
@@ -242,6 +258,7 @@ export default function App() {
   const [now, setNow] = useState(Date.now())
   const [settings, setSettings] = useState(loadSettings)
   const [pinned, setPinned] = useState(loadPinnedProjects)
+  const [platform, setPlatform] = useState(detectPlatform)
 
   const viewRef = useRef(view)
   const activeRef = useRef(active)
@@ -250,10 +267,14 @@ export default function App() {
   const settingsRef = useRef(settings)
   const messageToken = useRef(0)
   const toastTimer = useRef(null)
+  const preferencesTimer = useRef(null)
+  const pendingPreferences = useRef({})
+  const preferencesReady = useRef(false)
   const creatingRef = useRef(false)
   const bootRoute = useRef(initialRoute.kind === 'session' ? initialRoute : null)
   const hashInitialized = useRef(false)
-  const prevActiveRef = useRef(null)
+  const idleSeen = useRef(new Map())
+  const terminalTimers = useRef(new Map())
 
   useEffect(() => {
     viewRef.current = view
@@ -294,20 +315,76 @@ export default function App() {
   }, [])
 
   useEffect(() => {
-    const previous = prevActiveRef.current
-    prevActiveRef.current = active
-    if (!previous) return
-    const finished = Object.keys(previous).filter((id) => previous[id] && !active[id])
-    if (finished.length === 0) return
-    setCompleted((prev) => {
-      const next = { ...prev }
-      finished.forEach((id) => {
-        const viewing = viewRef.current.kind === 'session' && viewRef.current.id === id
-        if (!viewing) next[id] = 'done'
-      })
-      return next
+    const seen = idleSeen.current
+    const timers = terminalTimers.current
+    const clear = []
+    const schedule = []
+
+    sessions.forEach((item) => {
+      const id = item?.id
+      if (!id) return
+      const idle = Number(item.time?.idle) || 0
+      const outcome = item.outcome || ''
+      const previous = seen.get(id)
+      if (active[id]) {
+        seen.set(id, idle)
+        const timer = timers.get(id)
+        if (timer) {
+          clearTimeout(timer)
+          timers.delete(id)
+        }
+        clear.push(id)
+        return
+      }
+      if (!idle || !outcome) return
+      seen.set(id, idle)
+      if (previous === undefined || idle <= previous) return
+      schedule.push({ id, idle, outcome })
     })
-  }, [active])
+
+    if (clear.length > 0) {
+      setCompleted((prev) => {
+        let changed = false
+        const next = { ...prev }
+        clear.forEach((id) => {
+          if (id in next) {
+            delete next[id]
+            changed = true
+          }
+        })
+        return changed ? next : prev
+      })
+    }
+
+    schedule.forEach(({ id, idle, outcome }) => {
+      const existing = timers.get(id)
+      if (existing) clearTimeout(existing)
+      const timer = setTimeout(() => {
+        timers.delete(id)
+        if (activeRef.current[id]) return
+        const current = sessionsRef.current.find((entry) => entry.id === id)
+        if (!current) return
+        if ((Number(current.time?.idle) || 0) !== idle) return
+        if ((current.outcome || '') !== outcome) return
+        if (outcome === 'succeeded' && settingsRef.current.completionSound) {
+          playCompletionSound()
+        }
+        const viewing = viewRef.current.kind === 'session' && viewRef.current.id === id
+        if (viewing) return
+        const badge = outcome === 'failed' ? 'failed' : outcome === 'interrupted' ? 'interrupted' : 'done'
+        setCompleted((prev) => ({ ...prev, [id]: badge }))
+      }, TERMINAL_GRACE)
+      timers.set(id, timer)
+    })
+  }, [sessions, active])
+
+  useEffect(
+    () => () => {
+      terminalTimers.current.forEach((timer) => clearTimeout(timer))
+      terminalTimers.current.clear()
+    },
+    [],
+  )
 
   const activeKey = useMemo(() => Object.keys(active || {}).sort().join(','), [active])
 
@@ -343,32 +420,67 @@ export default function App() {
     toastTimer.current = setTimeout(() => setToast(null), 4600)
   }, [])
 
-  const toggleCompletionSound = () => {
-    const next = { ...settings, completionSound: !settings.completionSound }
+  const flushPreferences = useCallback(() => {
+    if (preferencesTimer.current) {
+      clearTimeout(preferencesTimer.current)
+      preferencesTimer.current = null
+    }
+    const pending = pendingPreferences.current
+    pendingPreferences.current = {}
+    if (Object.keys(pending).length === 0) return
+    fetch('/api/preferences', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(pending),
+      keepalive: true,
+    }).catch(() => {
+      /* 浏览器缓存已保存，下次操作会再同步到本机偏好文件 */
+    })
+  }, [])
+
+  const queuePreferences = useCallback(
+    (patch) => {
+      if (!preferencesReady.current) return
+      pendingPreferences.current = { ...pendingPreferences.current, ...patch }
+      if (preferencesTimer.current) clearTimeout(preferencesTimer.current)
+      preferencesTimer.current = setTimeout(flushPreferences, 250)
+    },
+    [flushPreferences],
+  )
+
+  useEffect(() => {
+    window.addEventListener('beforeunload', flushPreferences)
+    return () => {
+      window.removeEventListener('beforeunload', flushPreferences)
+      flushPreferences()
+    }
+  }, [flushPreferences])
+
+  const applySettings = (next) => {
     setSettings(next)
     saveSettings(next)
+    queuePreferences({ settings: next })
+  }
+
+  const toggleCompletionSound = () => {
+    const next = { ...settings, completionSound: !settings.completionSound }
+    applySettings(next)
     if (next.completionSound) playCompletionSound()
   }
 
   const chooseBackground = (percent) => {
     const next = { ...settings, background: backgroundFromPercent(percent) }
-    setSettings(next)
-    saveSettings(next)
+    applySettings(next)
   }
 
   const togglePinProject = (project) => {
     if (!project?.id) return
-    setPinned((prev) => {
-      const next = prev.includes(project.id)
-        ? prev.filter((id) => id !== project.id)
-        : [...prev, project.id]
-      try {
-        window.localStorage.setItem(PINNED_KEY, JSON.stringify(next))
-      } catch {
-        /* 浏览器禁用存储时只在本次会话生效 */
-      }
-      return next
-    })
+    const next = pinned.includes(project.id)
+      ? pinned.filter((id) => id !== project.id)
+      : [...pinned, project.id]
+    setPinned(next)
+    cachePinnedProjects(next)
+    queuePreferences({ pinnedProjects: next })
   }
 
   const loadSessions = useCallback(async () => {
@@ -448,6 +560,25 @@ export default function App() {
     }
   }, [loadSessions])
 
+  const fillRecent = useCallback(async (sessionId, cursor, token) => {
+    try {
+      const page = await api(
+        `/sessions/${sessionId}/messages?limit=${FILL_MESSAGE_LIMIT}&cursor=${encodeURIComponent(cursor)}`,
+      )
+      if (token !== messageToken.current) return
+      const older = (page?.data || []).slice().reverse()
+      if (older.length === 0) return
+      setSession((prev) => {
+        if (!prev || prev.info?.id !== sessionId) return prev
+        const ids = new Set(prev.messages.map((item) => item.id))
+        const merged = older.filter((item) => !ids.has(item.id)).concat(prev.messages)
+        return { ...prev, messages: merged, olderCursor: page?.cursor?.next || prev.olderCursor }
+      })
+    } catch {
+      /* 补页失败时保留首屏内容 */
+    }
+  }, [])
+
   const loadSession = useCallback(async (sessionId, options = {}) => {
     const silent = Boolean(options.silent)
     const token = messageToken.current + 1
@@ -456,7 +587,7 @@ export default function App() {
     try {
       const [detail, recent] = await Promise.all([
         api(`/sessions/${sessionId}`),
-        loadRecentMessages(sessionId),
+        loadRecentMessages(sessionId, INITIAL_MESSAGE_LIMIT),
       ])
       if (token !== messageToken.current) return
       setSession({
@@ -465,13 +596,14 @@ export default function App() {
         olderCursor: recent.olderCursor,
       })
       void loadPending(sessionId)
+      if (recent.olderCursor) void fillRecent(sessionId, recent.olderCursor, token)
     } catch (error) {
       if (token !== messageToken.current) return
       if (!silent) notify(error.message)
     } finally {
       if (token === messageToken.current && !silent) setSessionLoading(false)
     }
-  }, [loadPending, notify])
+  }, [fillRecent, loadPending, notify])
 
   const syncSession = useCallback(async (sessionId, options = {}) => {
     const token = messageToken.current
@@ -531,15 +663,45 @@ export default function App() {
     setBootLoading(true)
     setBootError('')
     try {
-      const health = await api('/health')
+      const [health, projectList, storedPreferences, platformInfo] = await Promise.all([
+        api('/health'),
+        api('/projects'),
+        api('/preferences').catch(() => null),
+        api('/platform').catch(() => null),
+      ])
       setService(health)
+      setProjects(Array.isArray(projectList) ? projectList : [])
+      if (platformInfo?.name) setPlatform(platformInfo)
+      if (storedPreferences) {
+        if (storedPreferences.initialized) {
+          const merged = {
+            ...DEFAULT_SETTINGS,
+            ...(storedPreferences.settings || {}),
+            background: normalizeBackground(storedPreferences.settings?.background),
+          }
+          setSettings(merged)
+          saveSettings(merged)
+          const pinnedList = Array.isArray(storedPreferences.pinnedProjects)
+            ? storedPreferences.pinnedProjects
+            : []
+          setPinned(pinnedList)
+          cachePinnedProjects(pinnedList)
+        } else {
+          api('/preferences', {
+            method: 'PUT',
+            body: JSON.stringify({
+              settings: loadSettings(),
+              pinnedProjects: loadPinnedProjects(),
+            }),
+          }).catch(() => {})
+        }
+      }
+      preferencesReady.current = true
       if (!health.reachable) {
         setBootError('opencode 服务没有响应，请确认本机 opencode 正在运行')
         return
       }
-      const projectList = await api('/projects')
-      setProjects(Array.isArray(projectList) ? projectList : [])
-      await loadSessions()
+      void loadSessions()
     } catch (error) {
       setBootError(error.message)
     } finally {
@@ -552,13 +714,11 @@ export default function App() {
   }, [bootstrap])
 
   useEffect(() => {
-    if (bootLoading) return
     const route = bootRoute.current
     if (!route) return
     bootRoute.current = null
-    setView({ kind: 'session', id: route.id })
     void loadSession(route.id)
-  }, [bootLoading, loadSession])
+  }, [loadSession])
 
   useEffect(() => {
     if (view.kind !== 'session' || session?.info?.id !== view.id) return
@@ -699,22 +859,25 @@ export default function App() {
         type === 'session.execution.interrupted'
       ) {
         const executed = payload?.data?.sessionID
-        if (type === 'session.execution.succeeded' && settingsRef.current.completionSound) {
-          playCompletionSound()
+        if (executed && type === 'session.execution.started') {
+          setActive((prev) =>
+            prev[executed] ? prev : { ...prev, [executed]: { type: 'running' } },
+          )
         }
         if (
           executed &&
-          (type === 'session.execution.succeeded' || type === 'session.execution.failed')
+          (type === 'session.execution.succeeded' ||
+            type === 'session.execution.failed' ||
+            type === 'session.execution.interrupted')
         ) {
-          const viewing = viewRef.current.kind === 'session' && viewRef.current.id === executed
-          if (!viewing) {
-            setCompleted((prev) => ({
-              ...prev,
-              [executed]: type === 'session.execution.failed' ? 'failed' : 'done',
-            }))
-          }
+          setActive((prev) => {
+            if (!prev[executed]) return prev
+            const next = { ...prev }
+            delete next[executed]
+            return next
+          })
         }
-        if (type !== 'session.execution.started') scheduleSessions(1200)
+        scheduleSessions(type === 'session.execution.started' ? 800 : 500)
         scheduleMessages(500)
         return
       }
@@ -1327,7 +1490,7 @@ export default function App() {
     setLoadingOlder(true)
     try {
       const page = await api(
-        `/sessions/${sessionId}/messages?limit=80&cursor=${encodeURIComponent(current.olderCursor)}`,
+        `/sessions/${sessionId}/messages?limit=${LOAD_OLDER_LIMIT}&cursor=${encodeURIComponent(current.olderCursor)}`,
       )
       const older = (page?.data || []).slice().reverse()
       setSession((prev) => {
@@ -1378,7 +1541,7 @@ export default function App() {
         method: 'POST',
         body: JSON.stringify({ path: directory }),
       })
-      notify(`已在终端运行：${result?.title || 'just_run.sh'}`, 'success')
+      notify(`已在终端运行：${result?.title || platform.script}`, 'success')
     } catch (error) {
       notify(error.message)
     }
@@ -1391,15 +1554,18 @@ export default function App() {
       notify('找不到项目目录')
       return
     }
-    const normalized = directory.replace(/\/+$/, '')
-    const split = normalized.lastIndexOf('/')
-    const parent = split > 0 ? normalized.slice(0, split) : '/'
+    const normalized = directory.replace(/[\\/]+$/, '')
     try {
-      await api('/reveal', {
+      const result = await api('/reveal', {
         method: 'POST',
-        body: JSON.stringify({ path: normalized, target: 'finder', select: true }),
+        body: JSON.stringify({ path: normalized, target: 'project' }),
       })
-      notify(`已打开上级目录并选中项目文件夹：${parent}`, 'success')
+      notify(
+        result?.selected
+          ? `已打开上级目录并选中项目文件夹：${parentPath(normalized) || '.'}`
+          : '已打开项目目录',
+        'success',
+      )
     } catch (error) {
       notify(error.message)
     }
@@ -1411,9 +1577,12 @@ export default function App() {
     try {
       await api('/reveal', {
         method: 'POST',
-        body: JSON.stringify({ path: directory, target }),
+        body: JSON.stringify({
+          path: directory,
+          target: target === 'terminal' ? 'terminal' : 'project',
+        }),
       })
-      notify(target === 'terminal' ? '已在终端打开项目目录' : '已在访达打开项目目录', 'success')
+      notify(target === 'terminal' ? '已在终端打开项目目录' : '已打开项目目录', 'success')
     } catch (error) {
       notify(error.message)
     }
@@ -1517,6 +1686,8 @@ export default function App() {
         onTogglePin={togglePinProject}
         onRefresh={() => void refreshCurrent()}
         onOpenSettings={() => setModal({ kind: 'settings' })}
+        shortcut={platform.shortcut}
+        folderLabel={platform.folderLabel}
         onRenameProject={(project) =>
           setModal({
             kind: 'project-rename',
@@ -1582,6 +1753,7 @@ export default function App() {
               attention={attention}
               completed={completed}
               onClearQuery={() => setQuery('')}
+              folderLabel={platform.folderLabel}
             />
           ) : (
             <SessionView
