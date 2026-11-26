@@ -148,7 +148,7 @@ function routeHash(view, selectedProject) {
   return '#/'
 }
 
-const DEFAULT_SETTINGS = { completionSound: true, background: '#f2f2f2' }
+const DEFAULT_SETTINGS = { completionSound: true, background: '#f2f2f2', theme: 'light' }
 
 const LEGACY_BACKGROUNDS = {
   light: '#fafafa',
@@ -158,6 +158,10 @@ const LEGACY_BACKGROUNDS = {
 
 const GRAY_MIN = 90
 const GRAY_MAX = 100
+
+function normalizeTheme(value) {
+  return value === 'dark' ? 'dark' : 'light'
+}
 
 function normalizeBackground(value) {
   const legacy = LEGACY_BACKGROUNDS[value]
@@ -220,7 +224,12 @@ function loadSettings() {
   try {
     const raw = window.localStorage.getItem(SETTINGS_KEY)
     const stored = raw ? JSON.parse(raw) : {}
-    return { ...DEFAULT_SETTINGS, ...stored, background: normalizeBackground(stored.background) }
+    return {
+      ...DEFAULT_SETTINGS,
+      ...stored,
+      background: normalizeBackground(stored.background),
+      theme: normalizeTheme(stored.theme),
+    }
   } catch {
     return { ...DEFAULT_SETTINGS }
   }
@@ -246,6 +255,8 @@ export default function App() {
   const [liveConnected, setLiveConnected] = useState(false)
   const [bootLoading, setBootLoading] = useState(true)
   const [bootError, setBootError] = useState('')
+  const [bootNote, setBootNote] = useState('')
+  const [discovering, setDiscovering] = useState(false)
   const [machines, setMachines] = useState([{ id: 'local', name: '本机', kind: 'local' }])
   const [machine, setMachine] = useState(() => {
     try {
@@ -316,12 +327,18 @@ export default function App() {
   }, [settings])
 
   useEffect(() => {
+    const theme = normalizeTheme(settings.theme)
     const background = normalizeBackground(settings.background)
-    document.documentElement.style.setProperty('--bg', background)
-    document.documentElement.style.setProperty('--sidebar-bg', shadeColor(background, -0.2))
+    const dark = theme === 'dark'
+    document.documentElement.dataset.theme = theme
+    document.documentElement.style.setProperty('--bg', dark ? '#161619' : background)
+    document.documentElement.style.setProperty(
+      '--sidebar-bg',
+      dark ? '#1d1d22' : shadeColor(background, -0.2),
+    )
     const meta = document.querySelector('meta[name="theme-color"]')
-    if (meta) meta.setAttribute('content', background)
-  }, [settings.background])
+    if (meta) meta.setAttribute('content', dark ? '#161619' : background)
+  }, [settings.background, settings.theme])
 
   useEffect(() => {
     const unlock = () => unlockAudio()
@@ -487,6 +504,10 @@ export default function App() {
     if (next.completionSound) playCompletionSound()
   }
 
+  const chooseTheme = (theme) => {
+    applySettings({ ...settings, theme: normalizeTheme(theme) })
+  }
+
   const chooseBackground = (percent) => {
     const next = { ...settings, background: backgroundFromPercent(percent) }
     applySettings(next)
@@ -618,7 +639,15 @@ export default function App() {
       if (recent.olderCursor) void fillRecent(sessionId, recent.olderCursor, token)
     } catch (error) {
       if (token !== messageToken.current) return
-      if (!silent) notify(error.message)
+      if (!silent) {
+        if (error.status === 404) {
+          setView({ kind: 'overview' })
+          setSession(null)
+          notify('这台机器上没有这条会话，已返回全部项目')
+        } else {
+          notify(error.message)
+        }
+      }
     } finally {
       if (token === messageToken.current && !silent) setSessionLoading(false)
     }
@@ -681,16 +710,54 @@ export default function App() {
   const bootstrap = useCallback(async () => {
     setBootLoading(true)
     setBootError('')
+    setBootNote('')
     try {
-      const [health, projectList, storedPreferences, platformInfo, machineList] = await Promise.all([
-        api('/health'),
+      const machineList = await api('/machines').catch(() => null)
+      const known = machineList?.machines || []
+      if (known.length > 0) setMachines(known)
+      let current = 'local'
+      try {
+        current = window.localStorage.getItem('ocm_machine') || 'local'
+      } catch {
+        current = 'local'
+      }
+      if (known.length > 0 && !known.some((item) => item.id === current)) {
+        current = 'local'
+        try {
+          window.localStorage.setItem('ocm_machine', 'local')
+        } catch {
+          /* 浏览器禁用存储时只在本次生效 */
+        }
+        setMachine('local')
+      }
+      let health = null
+      try {
+        health = await api('/health')
+      } catch (error) {
+        const label = known.find((item) => item.id === current)?.name || current
+        setBootError(
+          current === 'local'
+            ? `本机 opencode 没有响应（${error.message}）`
+            : `${label} 连不上：${error.message}`,
+        )
+        return
+      }
+      setService(health)
+      if (!health.reachable) {
+        const label = known.find((item) => item.id === current)?.name || current
+        const routes = (health.routes || []).filter(Boolean).join(' / ')
+        setBootError(
+          current === 'local'
+            ? `本机 opencode 没有响应${health.error ? `（${health.error}）` : ''}。确认 opencode 正在运行后重试。`
+            : `${label} 连不上：${health.error || routes || health.url}`,
+        )
+        return
+      }
+      const [projectList, storedPreferences, platformInfo] = await Promise.all([
         api('/projects'),
         api('/preferences').catch(() => null),
         api('/platform').catch(() => null),
-        api('/machines').catch(() => null),
       ])
-      if (machineList?.machines) setMachines(machineList.machines)
-      setService(health)
       setProjects(Array.isArray(projectList) ? projectList : [])
       if (platformInfo?.name) setPlatform(platformInfo)
       if (storedPreferences) {
@@ -699,6 +766,7 @@ export default function App() {
             ...DEFAULT_SETTINGS,
             ...(storedPreferences.settings || {}),
             background: normalizeBackground(storedPreferences.settings?.background),
+            theme: normalizeTheme(storedPreferences.settings?.theme),
           }
           setSettings(merged)
           saveSettings(merged)
@@ -718,10 +786,6 @@ export default function App() {
         }
       }
       preferencesReady.current = true
-      if (!health.reachable) {
-        setBootError('opencode 服务没有响应，请确认本机 opencode 正在运行')
-        return
-      }
       void loadSessions()
     } catch (error) {
       setBootError(error.message)
@@ -1040,6 +1104,35 @@ export default function App() {
     setPage(1)
     setSession(null)
     setSidebarOpen(false)
+  }
+
+  const switchMachine = (next) => {
+    if (!next || next === machine) return
+    try {
+      window.localStorage.setItem('ocm_machine', next)
+    } catch {
+      /* 浏览器禁用存储时只在本次生效 */
+    }
+    setMachine(next)
+    if (window.location.hash && window.location.hash !== '#/') {
+      window.history.replaceState(null, '', '#/')
+    }
+    window.location.reload()
+  }
+
+  const discoverMachine = async () => {
+    if (discovering || machine === 'local') return
+    setDiscovering(true)
+    setBootNote('正在局域网查找这台机器，按密码识别，换 IP 也能找到。')
+    try {
+      const result = await api(`/machines/${machine}/discover`, { method: 'POST' })
+      if (result?.route) setBootNote(`已找到 ${result.route}`)
+      await bootstrap()
+    } catch (error) {
+      setBootNote(error.message)
+    } finally {
+      setDiscovering(false)
+    }
   }
 
   const openSession = (sessionId, projectId) => {
@@ -1674,9 +1767,35 @@ export default function App() {
         <Logo size={44} />
         <h1>无法连接 opencode</h1>
         <p className="boot-message">{bootError}</p>
-        <button className="primary-button" onClick={() => void bootstrap()}>
-          重新连接
-        </button>
+        {machines.length > 1 ? (
+          <div className="boot-machines">
+            {machines.map((item) => (
+              <button
+                key={item.id}
+                className={`boot-machine ${machine === item.id ? 'on' : ''}`}
+                onClick={() => switchMachine(item.id)}
+              >
+                {item.name}
+              </button>
+            ))}
+          </div>
+        ) : null}
+        <div className="boot-actions">
+          {machine !== 'local' ? (
+            <>
+              <button className="primary-button" onClick={() => void discoverMachine()}>
+                {discovering ? '正在查找' : '自动查找'}
+              </button>
+              <button className="ghost-button" onClick={() => switchMachine('local')}>
+                切回本机
+              </button>
+            </>
+          ) : null}
+          <button className="ghost-button" onClick={() => void bootstrap()}>
+            重新连接
+          </button>
+        </div>
+        {bootNote ? <p className="boot-note">{bootNote}</p> : null}
       </div>
     )
   }
@@ -1701,15 +1820,7 @@ export default function App() {
         activeCount={activeCount}
         machines={machines}
         machine={machine}
-        onSwitchMachine={(next) => {
-          try {
-            window.localStorage.setItem('ocm_machine', next)
-          } catch {
-            /* 浏览器禁用存储时只在本次生效 */
-          }
-          setMachine(next)
-          window.location.reload()
-        }}
+        onSwitchMachine={switchMachine}
         open={sidebarOpen}
         onClose={() => setSidebarOpen(false)}
         now={now}
@@ -1921,6 +2032,28 @@ export default function App() {
               </button>
             </div>
           </div>
+          <div className="settings-row">
+            <div className="settings-copy">
+              <strong>主题</strong>
+            </div>
+            <div className="theme-options" role="radiogroup" aria-label="主题">
+              {[
+                ['light', '浅色'],
+                ['dark', '暗黑'],
+              ].map(([value, label]) => (
+                <button
+                  key={value}
+                  className={`theme-chip ${settings.theme === value ? 'on' : ''}`}
+                  role="radio"
+                  aria-checked={settings.theme === value}
+                  onClick={() => chooseTheme(value)}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+          </div>
+          {settings.theme === 'light' ? (
           <div className="settings-row settings-row-theme">
             <div className="settings-copy">
               <strong>背景颜色</strong>
@@ -1942,6 +2075,7 @@ export default function App() {
               </span>
             </label>
           </div>
+          ) : null}
           <div className="modal-actions">
             <button className="primary-button" onClick={() => setModal(null)}>
               完成

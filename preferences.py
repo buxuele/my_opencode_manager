@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 SCHEMA_VERSION = 1
-DEFAULT_SETTINGS = {"completionSound": True, "background": "#f2f2f2"}
+DEFAULT_SETTINGS = {"completionSound": True, "background": "#f2f2f2", "theme": "light"}
 HEX_COLOR = re.compile(r"^#[0-9a-fA-F]{6}$")
 PINNED_LIMIT = 500
 
@@ -31,6 +31,8 @@ def normalize_settings(raw):
     background = raw.get("background")
     if isinstance(background, str) and HEX_COLOR.match(background):
         settings["background"] = background.lower()
+    if raw.get("theme") in {"light", "dark"}:
+        settings["theme"] = raw["theme"]
     return settings
 
 
